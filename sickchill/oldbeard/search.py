@@ -18,6 +18,39 @@ if TYPE_CHECKING:  # pragma: no cover
 from sickchill.oldbeard import clients, common, db, helpers, notifiers, nzbget, nzbSplitter, sab, show_name_helpers, ui
 from sickchill.oldbeard.common import MULTI_EP_RESULT, SEASON_RESULT, SNATCHED, SNATCHED_BEST, SNATCHED_PROPER, Quality
 
+# AI Search Fallback - imported lazily to avoid circular imports
+_ai_search_advisor = None
+
+
+def _get_ai_fallback_result(results, episode, is_failed_retry=False):
+    """
+    Attempt AI fallback when rule-based picker returns None.
+
+    Args:
+        results: List of SearchResult objects
+        episode: TVEpisode object
+        is_failed_retry: True if this is a failed download retry
+
+    Returns:
+        SearchResult from AI analysis, or None
+    """
+    global _ai_search_advisor
+    try:
+        if _ai_search_advisor is None:
+            from sickchill.oldbeard.ai import search_advisor
+            _ai_search_advisor = search_advisor
+
+        if not _ai_search_advisor.should_use_ai_fallback(results, episode.show, None):
+            return None
+
+        return _ai_search_advisor.analyze_search_results(results, episode, is_failed_retry)
+    except ImportError:
+        # AI module not available
+        return None
+    except Exception as e:
+        logger.debug(f"AI fallback failed: {e}")
+        return None
+
 
 def _download_result(result: "SearchResult"):
     """
@@ -380,9 +413,17 @@ def search_for_needed_episodes():
 
             best_result = pick_best_result(found_rss_results[current_episode], current_episode.show)
 
-            # if all results were rejected move on to the next episode
+            # if all results were rejected, try AI fallback
             if not best_result:
-                logger.debug(f"All found results for {current_episode.pretty_name} were rejected.")
+                logger.debug(f"All found results for {current_episode.pretty_name} were rejected. Trying AI fallback...")
+                best_result = _get_ai_fallback_result(
+                    found_rss_results[current_episode],
+                    current_episode,
+                )
+
+            # if still no result, move on to the next episode
+            if not best_result:
+                logger.debug(f"No acceptable result found for {current_episode.pretty_name} (including AI fallback).")
                 continue
 
             # if it's already in the list (from another provider) and the newly found quality is no better, then skip it
@@ -400,7 +441,7 @@ def search_for_needed_episodes():
 
 
 # noinspection PyPep8Naming
-def search_providers(show, episodes, manual=False, downCurQuality=False):
+def search_providers(show, episodes, manual=False, downCurQuality=False, is_failed_retry=False):
     """
     Walk providers for information on shows
 
@@ -408,6 +449,7 @@ def search_providers(show, episodes, manual=False, downCurQuality=False):
     :param episodes: Episodes we hope to find
     :param manual: Boolean, is this a manual search?
     :param downCurQuality: Boolean, should we re-download currently available quality file
+    :param is_failed_retry: Boolean, is this a retry after failed download?
     :return: results for search
     """
     found_results = {}
@@ -645,8 +687,16 @@ def search_providers(show, episodes, manual=False, downCurQuality=False):
             if not found_results[curProvider.name][current_episode]:
                 continue
 
-            # if all results were rejected move on to the next episode
+            # if all results were rejected, try AI fallback
             best_result = pick_best_result(found_results[curProvider.name][current_episode], show)
+            if not best_result:
+                # Try to get episode object for AI fallback
+                episode_results = found_results[curProvider.name][current_episode]
+                if episode_results and episode_results[0].episodes:
+                    episode_obj = episode_results[0].episodes[0]
+                    logger.debug(f"Trying AI fallback for {show.name} episode {current_episode}...")
+                    best_result = _get_ai_fallback_result(episode_results, episode_obj, is_failed_retry)
+
             if not best_result:
                 continue
 

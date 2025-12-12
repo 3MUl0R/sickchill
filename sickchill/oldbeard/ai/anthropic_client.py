@@ -344,7 +344,10 @@ class AnthropicClient:
         """
         # First, try to parse the entire response as JSON
         try:
-            return json.loads(response_text.strip())
+            parsed = json.loads(response_text.strip())
+            if isinstance(parsed, dict):
+                return parsed
+            # Not a dict (e.g., array) - continue to other methods
         except json.JSONDecodeError:
             pass
 
@@ -353,7 +356,9 @@ class AnthropicClient:
         matches = re.findall(code_block_pattern, response_text, re.DOTALL)
         for match in matches:
             try:
-                return json.loads(match.strip())
+                parsed = json.loads(match.strip())
+                if isinstance(parsed, dict):
+                    return parsed
             except json.JSONDecodeError:
                 continue
 

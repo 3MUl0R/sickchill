@@ -281,7 +281,8 @@ class FailedQueueItem(generic_queue.QueueItem):
 
             # If it is wanted, self.downCurQuality doesn't matter
             # if it isn't wanted, we need to make sure to not overwrite the existing ep that we reverted to!
-            search_result = search.search_providers(self.show, self.segment, True)
+            # Pass is_failed_retry=True to enable more cautious AI fallback selection
+            search_result = search.search_providers(self.show, self.segment, True, is_failed_retry=True)
 
             if search_result:
                 for result in search_result:

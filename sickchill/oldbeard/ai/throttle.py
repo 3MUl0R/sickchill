@@ -54,6 +54,9 @@ class ThrottleManager:
         self._daily_calls: List[float] = []
         # Lock for thread-safe access to budget counters
         self._budget_lock = threading.Lock()
+        # Track in-flight reservations to prevent race conditions
+        # Key: scope_key (show ID), Value: timestamp when reserved
+        self._pending_reservations: Dict[str, float] = {}
 
     def _get_db(self) -> db.DBConnection:
         """Get a database connection to cache.db."""
@@ -135,6 +138,94 @@ class ThrottleManager:
             return False
 
         return True
+
+    def reserve_search_attempt(self, show) -> bool:
+        """
+        Atomically check cooldown and reserve a search slot for this show.
+
+        This prevents race conditions where multiple threads might both pass
+        the cooldown check before either records an attempt.
+
+        Args:
+            show: TVShow object
+
+        Returns:
+            True if reservation successful, False if blocked by cooldown/budget/concurrent request
+        """
+        scope_key = str(show.indexerid)
+
+        with self._budget_lock:
+            # Check if there's already a pending reservation for this show
+            if scope_key in self._pending_reservations:
+                # Check if reservation is stale (> 5 minutes old = likely crashed)
+                if time.time() - self._pending_reservations[scope_key] < 300:
+                    logger.debug(f"AI search for {show.name} blocked: concurrent request in progress")
+                    return False
+                # Stale reservation, clean it up
+                del self._pending_reservations[scope_key]
+
+            # Check standard cooldown (uses allow_search_for_show logic but inline)
+            if not settings.AI_ENABLED or not settings.AI_SEARCH_ENABLED:
+                return False
+
+            if not self._check_budget():
+                logger.debug("AI search blocked: budget exceeded")
+                return False
+
+            cooldown_days = settings.AI_SEARCH_COOLDOWN_DAYS_PER_SHOW
+            cooldown_seconds = cooldown_days * 24 * 60 * 60
+            last_attempt = self._get_last_attempt(self.CONTEXT_SEARCH, self.SCOPE_SHOW, scope_key)
+
+            if last_attempt is not None:
+                elapsed = time.time() - last_attempt
+                if elapsed < cooldown_seconds:
+                    remaining_hours = (cooldown_seconds - elapsed) / 3600
+                    logger.debug(
+                        f"AI search for show {show.name} blocked: cooldown ({remaining_hours:.1f}h remaining)"
+                    )
+                    return False
+
+            # All checks passed - create reservation
+            self._pending_reservations[scope_key] = time.time()
+            logger.debug(f"AI search reservation created for {show.name}")
+            return True
+
+    def commit_search_attempt(self, show) -> None:
+        """
+        Commit a reserved search attempt after successful API call.
+
+        This records the attempt in the database and releases the reservation.
+
+        Args:
+            show: TVShow object
+        """
+        scope_key = str(show.indexerid)
+
+        # Record the attempt in database
+        self.record_attempt(self.CONTEXT_SEARCH, self.SCOPE_SHOW, scope_key)
+
+        # Release the reservation
+        with self._budget_lock:
+            self._pending_reservations.pop(scope_key, None)
+
+        logger.debug(f"AI search attempt committed for {show.name}")
+
+    def release_search_reservation(self, show) -> None:
+        """
+        Release a search reservation without recording an attempt.
+
+        Use this when the API call fails or errors - we don't want to
+        consume the cooldown for a failed attempt.
+
+        Args:
+            show: TVShow object
+        """
+        scope_key = str(show.indexerid)
+
+        with self._budget_lock:
+            self._pending_reservations.pop(scope_key, None)
+
+        logger.debug(f"AI search reservation released for {show.name}")
 
     def allow_postprocess_for_file(self, file_path: str) -> bool:
         """
