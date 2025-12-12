@@ -168,7 +168,8 @@ class ThrottleManager:
             if not settings.AI_ENABLED or not settings.AI_SEARCH_ENABLED:
                 return False
 
-            if not self._check_budget():
+            # Use unlocked version since we already hold _budget_lock
+            if not self._check_budget_unlocked():
                 logger.debug("AI search blocked: budget exceeded")
                 return False
 
@@ -263,6 +264,95 @@ class ThrottleManager:
 
         return True
 
+    def reserve_postprocess_attempt(self, file_path: str) -> bool:
+        """
+        Atomically check cooldown and reserve a post-process slot for this file.
+
+        This prevents race conditions where multiple threads might both pass
+        the cooldown check before either records an attempt.
+
+        Args:
+            file_path: Path to the file
+
+        Returns:
+            True if reservation successful, False if blocked by cooldown/budget/concurrent request
+        """
+        scope_key = self.get_file_fingerprint(file_path)
+
+        with self._budget_lock:
+            # Check if there's already a pending reservation for this file
+            if scope_key in self._pending_reservations:
+                # Check if reservation is stale (> 5 minutes old = likely crashed)
+                if time.time() - self._pending_reservations[scope_key] < 300:
+                    logger.debug(f"AI post-process for file blocked: concurrent request in progress")
+                    return False
+                # Stale reservation, clean it up
+                del self._pending_reservations[scope_key]
+
+            # Check standard cooldown
+            if not settings.AI_ENABLED:
+                return False
+
+            # Use unlocked version since we already hold _budget_lock
+            if not self._check_budget_unlocked():
+                logger.debug("AI post-process blocked: budget exceeded")
+                return False
+
+            cooldown_hours = settings.AI_POSTPROCESS_MATCH_COOLDOWN_HOURS_PER_FILE
+            cooldown_seconds = cooldown_hours * 60 * 60
+            last_attempt = self._get_last_attempt(self.CONTEXT_POSTPROCESS, self.SCOPE_FILE, scope_key)
+
+            if last_attempt is not None:
+                elapsed = time.time() - last_attempt
+                if elapsed < cooldown_seconds:
+                    remaining_hours = (cooldown_seconds - elapsed) / 3600
+                    logger.debug(
+                        f"AI post-process for file blocked: cooldown ({remaining_hours:.1f}h remaining)"
+                    )
+                    return False
+
+            # All checks passed - create reservation
+            self._pending_reservations[scope_key] = time.time()
+            logger.debug(f"AI post-process reservation created for file")
+            return True
+
+    def commit_postprocess_attempt(self, file_path: str) -> None:
+        """
+        Commit a reserved post-process attempt after successful API call.
+
+        This records the attempt in the database and releases the reservation.
+
+        Args:
+            file_path: Path to the file
+        """
+        scope_key = self.get_file_fingerprint(file_path)
+
+        # Record the attempt in database
+        self.record_attempt(self.CONTEXT_POSTPROCESS, self.SCOPE_FILE, scope_key)
+
+        # Release the reservation
+        with self._budget_lock:
+            self._pending_reservations.pop(scope_key, None)
+
+        logger.debug(f"AI post-process attempt committed for file")
+
+    def release_postprocess_reservation(self, file_path: str) -> None:
+        """
+        Release a post-process reservation without recording an attempt.
+
+        Use this when the API call fails or errors - we don't want to
+        consume the cooldown for a failed attempt.
+
+        Args:
+            file_path: Path to the file
+        """
+        scope_key = self.get_file_fingerprint(file_path)
+
+        with self._budget_lock:
+            self._pending_reservations.pop(scope_key, None)
+
+        logger.debug(f"AI post-process reservation released for file")
+
     def record_attempt(self, context: str, scope: str, scope_key: str) -> None:
         """
         Record that an AI request was attempted.
@@ -349,9 +439,11 @@ class ThrottleManager:
             return float(result[0]["last_attempt"])
         return None
 
-    def _check_budget(self) -> bool:
+    def _check_budget_unlocked(self) -> bool:
         """
         Check if we're within hourly and daily budget limits.
+
+        IMPORTANT: Caller must hold _budget_lock before calling this method.
 
         Note: Budget counters are in-memory only and reset on restart.
         This is a soft limit for runaway prevention, not a hard cost cap.
@@ -363,23 +455,34 @@ class ThrottleManager:
         hour_ago = now - 3600
         day_ago = now - 86400
 
-        with self._budget_lock:
-            # Clean up old entries
-            self._hourly_calls = [t for t in self._hourly_calls if t > hour_ago]
-            self._daily_calls = [t for t in self._daily_calls if t > day_ago]
+        # Clean up old entries
+        self._hourly_calls = [t for t in self._hourly_calls if t > hour_ago]
+        self._daily_calls = [t for t in self._daily_calls if t > day_ago]
 
-            hourly_limit = settings.AI_MAX_CALLS_PER_HOUR
-            daily_limit = settings.AI_MAX_CALLS_PER_DAY
+        hourly_limit = settings.AI_MAX_CALLS_PER_HOUR
+        daily_limit = settings.AI_MAX_CALLS_PER_DAY
 
-            if len(self._hourly_calls) >= hourly_limit:
-                logger.warning(f"AI hourly budget exceeded ({len(self._hourly_calls)}/{hourly_limit})")
-                return False
+        if len(self._hourly_calls) >= hourly_limit:
+            logger.warning(f"AI hourly budget exceeded ({len(self._hourly_calls)}/{hourly_limit})")
+            return False
 
-            if len(self._daily_calls) >= daily_limit:
-                logger.warning(f"AI daily budget exceeded ({len(self._daily_calls)}/{daily_limit})")
-                return False
+        if len(self._daily_calls) >= daily_limit:
+            logger.warning(f"AI daily budget exceeded ({len(self._daily_calls)}/{daily_limit})")
+            return False
 
         return True
+
+    def _check_budget(self) -> bool:
+        """
+        Check if we're within hourly and daily budget limits.
+
+        Thread-safe wrapper around _check_budget_unlocked().
+
+        Returns:
+            True if within budget
+        """
+        with self._budget_lock:
+            return self._check_budget_unlocked()
 
     def get_budget_status(self) -> Dict[str, Any]:
         """

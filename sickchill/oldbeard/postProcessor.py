@@ -34,6 +34,103 @@ METHOD_SYMLINK_REVERSED = "symlink_reversed"
 
 PROCESS_METHODS = [METHOD_COPY, METHOD_MOVE, METHOD_HARDLINK, METHOD_SYMLINK, METHOD_SYMLINK_REVERSED]
 
+# AI Post-Processing - imported lazily to avoid circular imports
+_ai_postprocess_matcher = None
+_ai_postprocess_analyzer = None
+
+
+def _get_ai_match_result(file_path, filename, folder_name, release_name=None):
+    """
+    Attempt AI matching when rule-based parsing fails.
+
+    Args:
+        file_path: Full path to the video file
+        filename: The filename only
+        folder_name: The containing folder name
+        release_name: Optional release name if known
+
+    Returns:
+        Match result dict from AI, or None
+    """
+    global _ai_postprocess_matcher
+    try:
+        if _ai_postprocess_matcher is None:
+            from sickchill.oldbeard.ai import postprocess_matcher
+            _ai_postprocess_matcher = postprocess_matcher
+
+        if not _ai_postprocess_matcher.should_use_ai_match(None, None, []):
+            return None
+
+        return _ai_postprocess_matcher.match_file(
+            file_path=file_path,
+            filename=filename,
+            folder_name=folder_name,
+            release_name=release_name,
+        )
+    except ImportError:
+        # AI module not available
+        return None
+    except Exception as e:
+        logger.debug(f"AI matching failed: {e}")
+        return None
+
+
+def _get_ai_analysis_result(file_path, episode, quality, release_group=None):
+    """
+    Attempt AI quality verification after file is matched.
+
+    Args:
+        file_path: Full path to the video file
+        episode: The matched TVEpisode object
+        quality: The detected quality value
+        release_group: Optional release group if known
+
+    Returns:
+        Analysis result dict from AI, or None
+    """
+    global _ai_postprocess_analyzer
+    try:
+        if _ai_postprocess_analyzer is None:
+            from sickchill.oldbeard.ai import postprocess_analyzer
+            _ai_postprocess_analyzer = postprocess_analyzer
+
+        return _ai_postprocess_analyzer.analyze_file(
+            file_path=file_path,
+            episode=episode,
+            quality=quality,
+            release_group=release_group,
+        )
+    except ImportError:
+        # AI module not available
+        return None
+    except Exception as e:
+        logger.debug(f"AI analysis failed: {e}")
+        return None
+
+
+def _should_block_processing(analysis_result):
+    """
+    Check if AI analysis recommends blocking processing.
+
+    Args:
+        analysis_result: Result from _get_ai_analysis_result
+
+    Returns:
+        True if processing should be blocked
+    """
+    global _ai_postprocess_analyzer
+    try:
+        if _ai_postprocess_analyzer is None:
+            from sickchill.oldbeard.ai import postprocess_analyzer
+            _ai_postprocess_analyzer = postprocess_analyzer
+
+        return _ai_postprocess_analyzer.should_block_processing(analysis_result)
+    except ImportError:
+        return False
+    except Exception as e:
+        logger.debug(f"AI block check failed: {e}")
+        return False
+
 
 class PostProcessor(object):
     """
@@ -740,6 +837,38 @@ class PostProcessor(object):
             if show and season and episodes:
                 return show, season, episodes, quality, version
 
+        # If normal matching failed, try AI fallback
+        if not show or season is None or not episodes:
+            self._log("Normal parsing failed, attempting AI fallback...", logger.DEBUG)
+            ai_result = _get_ai_match_result(
+                file_path=self.directory,
+                filename=self.filename,
+                folder_name=self.folder_name,
+                release_name=self.release_name,
+            )
+
+            if ai_result and ai_result.get("show_indexer_id", -1) > 0:
+                # Try to get the show from the AI match result
+                try:
+                    ai_show = Show.find(settings.show_list, ai_result["show_indexer_id"])
+                    if ai_show:
+                        show = ai_show
+                        ai_season = ai_result.get("season")
+                        ai_episodes = ai_result.get("episodes", [])
+
+                        if ai_season is not None:
+                            season = ai_season
+                        if ai_episodes:
+                            episodes = ai_episodes
+
+                        self._log(
+                            f"AI matched file to {show.name} S{season}E{episodes} "
+                            f"(confidence: {ai_result.get('confidence', 0):.0%})",
+                            logger.INFO
+                        )
+                except Exception as e:
+                    self._log(f"Failed to load AI-matched show: {e}", logger.DEBUG)
+
         return show, season, episodes, quality, version
 
     def _get_ep_obj(self, show, season, episodes):
@@ -1020,6 +1149,19 @@ class PostProcessor(object):
         # if the file is priority then we're going to replace it even if it exists
         else:
             self._log(_("This download is marked a priority download so I'm going to replace an existing file if I find one"))
+
+        # Optional AI quality verification (if enabled)
+        # Run after priority/existing file checks to avoid wasting AI calls on files that would be skipped
+        ai_analysis = _get_ai_analysis_result(
+            file_path=self.directory,
+            episode=episode_object,
+            quality=new_ep_quality,
+            release_group=self.release_group,
+        )
+        if _should_block_processing(ai_analysis):
+            issues = ai_analysis.get("issues", []) if ai_analysis else []
+            self._log(_("AI analysis detected issues, blocking processing: {issues}").format(issues=issues), logger.WARNING)
+            return False
 
         # try to find out if we have enough space to perform the copy or move action.
         if settings.USE_FREE_SPACE_CHECK:
