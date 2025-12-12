@@ -106,6 +106,7 @@ experimental = ["experimental"]
 speedups = ["speedups"]
 types = ["types"]
 frontend = ["frontend"]
+ai = ["anthropic"]
 
 [build-system]
 requires = ["poetry-core>=1.2.0"]
@@ -277,3 +278,6 @@ stevedore = "^5.1.0"
 cachecontrol = ">=0.13.1,<0.15.0"
 cinemagoer = {version = "^2023.5.1", allow-prereleases = true}
 appdirs = "^1.4.4"
+
+# AI Features (optional - only required if AI features are enabled)
+anthropic = {version = ">=0.40.0,<1.0.0", optional = true}

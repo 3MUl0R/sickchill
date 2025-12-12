@@ -64,3 +64,43 @@ class ResultsTable(InitialSchema):
                     [provider_id],
                 )
                 self.connection.action("DROP TABLE {}".format(provider_id))
+
+
+class AITables(ResultsTable):
+    """Migration to add AI throttle and cache tables."""
+
+    def test(self):
+        return self.has_table("ai_throttle")
+
+    def execute(self):
+        # Create AI throttle table for rate limiting
+        self.connection.action(
+            """
+            CREATE TABLE ai_throttle (
+                context TEXT,
+                scope TEXT,
+                scope_key TEXT,
+                last_attempt NUMERIC,
+                last_success NUMERIC,
+                PRIMARY KEY(context, scope, scope_key)
+            )
+            """
+        )
+
+        # Create AI cache table for response caching
+        self.connection.action(
+            """
+            CREATE TABLE ai_cache (
+                request_hash TEXT PRIMARY KEY,
+                response_json TEXT,
+                created NUMERIC,
+                expires NUMERIC,
+                context TEXT,
+                scope TEXT,
+                scope_key TEXT
+            )
+            """
+        )
+
+        # Index for cache cleanup
+        self.connection.action("CREATE INDEX IF NOT EXISTS idx_ai_cache_expires ON ai_cache (expires)")

@@ -476,6 +476,36 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
         settings.FREEMOBILE_ID = check_setting_str(settings.CFG, "FreeMobile", "freemobile_id")
         settings.FREEMOBILE_APIKEY = check_setting_str(settings.CFG, "FreeMobile", "freemobile_apikey")
 
+        # AI Configuration
+        settings.AI_ENABLED = check_setting_bool(settings.CFG, "AI", "ai_enabled")
+        settings.AI_REQUEST_TIMEOUT = check_setting_int(settings.CFG, "AI", "ai_request_timeout", 30, min_val=10, max_val=120)
+        settings.AI_CONFIDENCE_THRESHOLD = check_setting_float(settings.CFG, "AI", "ai_confidence_threshold", 0.80, min_val=0.0, max_val=1.0)
+        settings.AI_NOTIFY_ON_FALLBACK_FAILURE = check_setting_bool(settings.CFG, "AI", "ai_notify_on_fallback_failure", True)
+
+        settings.ANTHROPIC_API_KEY = check_setting_str(settings.CFG, "AI", "anthropic_api_key", censor_log=True)
+        settings.ANTHROPIC_MODEL = check_setting_str(settings.CFG, "AI", "anthropic_model", "claude-sonnet-4-20250514")
+
+        settings.AI_MAX_CALLS_PER_HOUR = check_setting_int(settings.CFG, "AI", "ai_max_calls_per_hour", 20, min_val=1, max_val=100)
+        settings.AI_MAX_CALLS_PER_DAY = check_setting_int(settings.CFG, "AI", "ai_max_calls_per_day", 200, min_val=1, max_val=1000)
+        settings.AI_CACHE_TTL_DAYS = check_setting_int(settings.CFG, "AI", "ai_cache_ttl_days", 30, min_val=1, max_val=365)
+
+        settings.AI_SEARCH_ENABLED = check_setting_bool(settings.CFG, "AI", "ai_search_enabled")
+        settings.AI_SEARCH_ONLY_ON_FAILURE = check_setting_bool(settings.CFG, "AI", "ai_search_only_on_failure", True)
+        settings.AI_SEARCH_COOLDOWN_DAYS_PER_SHOW = check_setting_int(settings.CFG, "AI", "ai_search_cooldown_days_per_show", 7, min_val=1, max_val=30)
+        settings.AI_SEARCH_MIN_RESULTS = check_setting_int(settings.CFG, "AI", "ai_search_min_results", 1, min_val=1, max_val=10)
+        settings.AI_SEARCH_FALLBACK_TO_RULES_ON_ERROR = check_setting_bool(settings.CFG, "AI", "ai_search_fallback_to_rules_on_error", True)
+        settings.AI_SEARCH_ALLOW_RELAX_FILTERS = check_setting_bool(settings.CFG, "AI", "ai_search_allow_relax_filters")
+
+        settings.AI_POSTPROCESS_MATCH_ENABLED = check_setting_bool(settings.CFG, "AI", "ai_postprocess_match_enabled")
+        settings.AI_POSTPROCESS_MATCH_ONLY_ON_FAILURE = check_setting_bool(settings.CFG, "AI", "ai_postprocess_match_only_on_failure", True)
+        settings.AI_POSTPROCESS_MATCH_COOLDOWN_HOURS_PER_FILE = check_setting_int(settings.CFG, "AI", "ai_postprocess_match_cooldown_hours_per_file", 72, min_val=1, max_val=720)
+        settings.AI_POSTPROCESS_MATCH_MIN_CONFIDENCE = check_setting_float(settings.CFG, "AI", "ai_postprocess_match_min_confidence", 0.85, min_val=0.0, max_val=1.0)
+
+        settings.AI_POSTPROCESS_ANALYZE_ENABLED = check_setting_bool(settings.CFG, "AI", "ai_postprocess_analyze_enabled")
+        settings.AI_POSTPROCESS_VERIFY_QUALITY = check_setting_bool(settings.CFG, "AI", "ai_postprocess_verify_quality", True)
+        settings.AI_POSTPROCESS_DETECT_ISSUES = check_setting_bool(settings.CFG, "AI", "ai_postprocess_detect_issues", True)
+        settings.AI_POSTPROCESS_SUGGEST_METADATA = check_setting_bool(settings.CFG, "AI", "ai_postprocess_suggest_metadata")
+
         settings.FLARESOLVERR_URI = check_setting_str(settings.CFG, "General", "flaresolverr_uri")
 
         settings.USE_TELEGRAM = check_setting_bool(settings.CFG, "Telegram", "use_telegram")
@@ -1389,6 +1419,31 @@ def save_config():
                 "freemobile_notify_onsubtitledownload": int(settings.FREEMOBILE_NOTIFY_ONSUBTITLEDOWNLOAD),
                 "freemobile_id": settings.FREEMOBILE_ID,
                 "freemobile_apikey": settings.FREEMOBILE_APIKEY,
+            },
+            "AI": {
+                "ai_enabled": int(settings.AI_ENABLED),
+                "ai_request_timeout": int(settings.AI_REQUEST_TIMEOUT),
+                "ai_confidence_threshold": float(settings.AI_CONFIDENCE_THRESHOLD),
+                "ai_notify_on_fallback_failure": int(settings.AI_NOTIFY_ON_FALLBACK_FAILURE),
+                "anthropic_api_key": settings.ANTHROPIC_API_KEY or "",
+                "anthropic_model": settings.ANTHROPIC_MODEL,
+                "ai_max_calls_per_hour": int(settings.AI_MAX_CALLS_PER_HOUR),
+                "ai_max_calls_per_day": int(settings.AI_MAX_CALLS_PER_DAY),
+                "ai_cache_ttl_days": int(settings.AI_CACHE_TTL_DAYS),
+                "ai_search_enabled": int(settings.AI_SEARCH_ENABLED),
+                "ai_search_only_on_failure": int(settings.AI_SEARCH_ONLY_ON_FAILURE),
+                "ai_search_cooldown_days_per_show": int(settings.AI_SEARCH_COOLDOWN_DAYS_PER_SHOW),
+                "ai_search_min_results": int(settings.AI_SEARCH_MIN_RESULTS),
+                "ai_search_fallback_to_rules_on_error": int(settings.AI_SEARCH_FALLBACK_TO_RULES_ON_ERROR),
+                "ai_search_allow_relax_filters": int(settings.AI_SEARCH_ALLOW_RELAX_FILTERS),
+                "ai_postprocess_match_enabled": int(settings.AI_POSTPROCESS_MATCH_ENABLED),
+                "ai_postprocess_match_only_on_failure": int(settings.AI_POSTPROCESS_MATCH_ONLY_ON_FAILURE),
+                "ai_postprocess_match_cooldown_hours_per_file": int(settings.AI_POSTPROCESS_MATCH_COOLDOWN_HOURS_PER_FILE),
+                "ai_postprocess_match_min_confidence": float(settings.AI_POSTPROCESS_MATCH_MIN_CONFIDENCE),
+                "ai_postprocess_analyze_enabled": int(settings.AI_POSTPROCESS_ANALYZE_ENABLED),
+                "ai_postprocess_verify_quality": int(settings.AI_POSTPROCESS_VERIFY_QUALITY),
+                "ai_postprocess_detect_issues": int(settings.AI_POSTPROCESS_DETECT_ISSUES),
+                "ai_postprocess_suggest_metadata": int(settings.AI_POSTPROCESS_SUGGEST_METADATA),
             },
             "Telegram": {
                 "use_telegram": int(settings.USE_TELEGRAM),
