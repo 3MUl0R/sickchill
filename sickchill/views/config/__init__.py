@@ -1,3 +1,4 @@
+from sickchill.views.config.ai import ConfigAI
 from sickchill.views.config.anime import ConfigAnime
 from sickchill.views.config.backup import ConfigBackupRestore
 from sickchill.views.config.general import ConfigGeneral
