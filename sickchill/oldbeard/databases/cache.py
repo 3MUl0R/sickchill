@@ -104,3 +104,75 @@ class AITables(ResultsTable):
 
         # Index for cache cleanup
         self.connection.action("CREATE INDEX IF NOT EXISTS idx_ai_cache_expires ON ai_cache (expires)")
+
+
+class AIPhase4Tables(AITables):
+    """Migration to add Phase 4 AI tables for cost tracking, preferences, and feedback."""
+
+    def test(self):
+        return self.has_table("ai_usage")
+
+    def execute(self):
+        # Create AI usage table for cost tracking
+        self.connection.action(
+            """
+            CREATE TABLE ai_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp NUMERIC NOT NULL,
+                model TEXT NOT NULL,
+                context TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                estimated_cost_usd REAL NOT NULL,
+                scope_key TEXT
+            )
+            """
+        )
+        self.connection.action("CREATE INDEX IF NOT EXISTS idx_ai_usage_timestamp ON ai_usage (timestamp)")
+        self.connection.action("CREATE INDEX IF NOT EXISTS idx_ai_usage_scope ON ai_usage (scope_key)")
+
+        # Create AI show preferences table
+        self.connection.action(
+            """
+            CREATE TABLE ai_show_preferences (
+                show_id INTEGER PRIMARY KEY,
+                preferences_json TEXT NOT NULL,
+                updated_at NUMERIC NOT NULL
+            )
+            """
+        )
+
+        # Create AI decisions table for feedback loop
+        self.connection.action(
+            """
+            CREATE TABLE ai_decisions (
+                decision_id TEXT PRIMARY KEY,
+                decision_type TEXT NOT NULL,
+                timestamp NUMERIC NOT NULL,
+                show_id INTEGER,
+                input_summary TEXT NOT NULL,
+                output_summary TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                reasoning TEXT,
+                raw_response TEXT
+            )
+            """
+        )
+        self.connection.action("CREATE INDEX IF NOT EXISTS idx_ai_decisions_timestamp ON ai_decisions (timestamp)")
+        self.connection.action("CREATE INDEX IF NOT EXISTS idx_ai_decisions_show ON ai_decisions (show_id)")
+
+        # Create AI feedback table
+        self.connection.action(
+            """
+            CREATE TABLE ai_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                decision_id TEXT NOT NULL,
+                feedback_type TEXT NOT NULL,
+                user_correction TEXT,
+                notes TEXT,
+                timestamp NUMERIC NOT NULL,
+                FOREIGN KEY (decision_id) REFERENCES ai_decisions (decision_id)
+            )
+            """
+        )
+        self.connection.action("CREATE INDEX IF NOT EXISTS idx_ai_feedback_decision ON ai_feedback (decision_id)")

@@ -360,15 +360,15 @@ class TestRetryLogic(unittest.TestCase):
         """Test that transient errors trigger retry."""
         from sickchill.oldbeard.ai.anthropic_client import AIError
 
-        # Fail twice, then succeed
+        # Fail twice, then succeed (returns tuple of (response, usage))
         mock_make_request.side_effect = [
             AIError("Transient error: Connection timeout"),
             AIError("Transient error: Network error"),
-            {"selected_index": 1, "confidence": 0.9},
+            ({"selected_index": 1, "confidence": 0.9}, None),  # Tuple: (response, usage)
         ]
 
         client = AnthropicClient(api_key="test-key")
-        result = client.analyze("test prompt")
+        result = client.analyze("test prompt", use_cache=False)  # Disable cache to avoid needing to mock it
 
         self.assertEqual(result["selected_index"], 1)
         self.assertEqual(mock_make_request.call_count, 3)
@@ -383,7 +383,7 @@ class TestRetryLogic(unittest.TestCase):
         client = AnthropicClient(api_key="invalid-key")
 
         with self.assertRaises(AIConfigurationError):
-            client.analyze("test prompt")
+            client.analyze("test prompt", use_cache=False)
 
         # Should only try once
         self.assertEqual(mock_make_request.call_count, 1)
@@ -400,7 +400,7 @@ class TestRetryLogic(unittest.TestCase):
         client = AnthropicClient(api_key="test-key")
 
         with self.assertRaises(AIRateLimitError):
-            client.analyze("test prompt")
+            client.analyze("test prompt", use_cache=False)
 
         # Should only try once
         self.assertEqual(mock_make_request.call_count, 1)
@@ -417,7 +417,7 @@ class TestRetryLogic(unittest.TestCase):
         client = AnthropicClient(api_key="test-key")
 
         with self.assertRaises(AIError):
-            client.analyze("test prompt")
+            client.analyze("test prompt", use_cache=False)
 
         # Should try MAX_RETRIES times
         self.assertEqual(mock_make_request.call_count, MAX_RETRIES)

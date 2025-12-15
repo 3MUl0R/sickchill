@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from sickchill import settings
 from sickchill.oldbeard import ui
-from sickchill.oldbeard.ai import get_client, get_throttle, is_ai_available
+from sickchill.oldbeard.ai import get_client, get_feedback_manager, get_preferences_manager, get_throttle, is_ai_available
 
 if TYPE_CHECKING:
     from sickchill.tv import TVShow
@@ -337,9 +337,14 @@ def match_file(
 
         logger.info(f"AI analyzing file for matching: {filename}")
 
+        # Get file fingerprint for cost tracking
+        file_fingerprint = throttle.get_file_fingerprint(file_path)
+
         response = client.analyze(
             prompt=prompt,
             max_tokens=512,
+            cost_context="postprocess",
+            cost_scope_key=file_fingerprint,
         )
 
         # Commit the attempt now that API call succeeded
@@ -399,6 +404,24 @@ def match_file(
         # Record success
         throttle.record_postprocess_success(file_path)
 
+        # Record decision for feedback tracking
+        try:
+            from sickchill.oldbeard.ai.feedback import DecisionType
+
+            feedback_mgr = get_feedback_manager()
+            show_name = matched_candidate["name"] if matched_candidate else f"ID:{show_id}"
+            feedback_mgr.record_decision(
+                decision_type=DecisionType.FILE_MATCH,
+                input_summary=f"Match file: {filename[:80]}",
+                output_summary=f"Matched to {show_name} S{result['season']}E{result['episodes']}",
+                confidence=confidence,
+                reasoning=reasoning,
+                raw_response=response,
+                show_id=show_id,
+            )
+        except Exception as e:
+            logger.debug(f"Failed to record AI decision: {e}")
+
         return result
 
     except Exception as e:
@@ -425,22 +448,20 @@ def should_use_ai_match(
     Returns:
         True if AI matching should be attempted
     """
-    # AI must be enabled and configured
+    # AI must be enabled at global level
     if not settings.AI_ENABLED or not settings.AI_POSTPROCESS_MATCH_ENABLED:
         return False
 
-    # Only use AI when normal matching failed
-    if settings.AI_POSTPROCESS_MATCH_ONLY_ON_FAILURE:
-        # If we have complete info, don't use AI
-        if show and season is not None and episodes:
-            return False
+    # Determine if we have a complete match
+    has_match = show is not None and season is not None and episodes
 
-    # If we couldn't identify the show at all, try AI
+    # If we have the show, check per-show preferences
+    if show is not None:
+        prefs_manager = get_preferences_manager()
+        return prefs_manager.should_use_ai_postprocess(show, has_match)
+
+    # If we couldn't identify the show at all, try AI (can't check per-show prefs)
     if show is None:
-        return True
-
-    # If we have the show but missing season/episodes, try AI
-    if season is None or not episodes:
         return True
 
     return False

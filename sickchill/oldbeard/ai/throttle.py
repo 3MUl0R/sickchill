@@ -120,7 +120,8 @@ class ThrottleManager:
             logger.debug("AI search blocked: budget exceeded")
             return False
 
-        cooldown_days = settings.AI_SEARCH_COOLDOWN_DAYS_PER_SHOW
+        # Get per-show cooldown if configured, otherwise use global setting
+        cooldown_days = self._get_cooldown_days_for_show(show)
         cooldown_seconds = cooldown_days * 24 * 60 * 60
 
         scope_key = str(show.indexerid)
@@ -173,7 +174,8 @@ class ThrottleManager:
                 logger.debug("AI search blocked: budget exceeded")
                 return False
 
-            cooldown_days = settings.AI_SEARCH_COOLDOWN_DAYS_PER_SHOW
+            # Get per-show cooldown if configured, otherwise use global setting
+            cooldown_days = self._get_cooldown_days_for_show(show)
             cooldown_seconds = cooldown_days * 24 * 60 * 60
             last_attempt = self._get_last_attempt(self.CONTEXT_SEARCH, self.SCOPE_SHOW, scope_key)
 
@@ -421,6 +423,22 @@ class ThrottleManager:
         """Convenience method to record a successful post-process for a file."""
         fingerprint = self.get_file_fingerprint(file_path)
         self.record_success(self.CONTEXT_POSTPROCESS, self.SCOPE_FILE, fingerprint)
+
+    def _get_cooldown_days_for_show(self, show) -> int:
+        """
+        Get the cooldown days for a show, using per-show preference if set.
+
+        Args:
+            show: TVShow object
+
+        Returns:
+            Cooldown days (per-show override or global setting)
+        """
+        # Import here to avoid circular dependency
+        from sickchill.oldbeard.ai.show_preferences import get_preferences_manager
+
+        prefs_manager = get_preferences_manager()
+        return prefs_manager.get_search_cooldown_days(show)
 
     def _get_last_attempt(self, context: str, scope: str, scope_key: str) -> Optional[float]:
         """

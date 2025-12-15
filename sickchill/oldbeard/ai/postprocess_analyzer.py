@@ -240,9 +240,14 @@ def analyze_file(
 
         logger.info(f"AI analyzing file quality: {filename}")
 
+        # Get file fingerprint for cost tracking
+        file_fingerprint = throttle.get_file_fingerprint(file_path)
+
         response = client.analyze(
             prompt=prompt,
             max_tokens=512,
+            cost_context="postprocess",
+            cost_scope_key=file_fingerprint,
         )
 
         # Commit the attempt now that API call succeeded

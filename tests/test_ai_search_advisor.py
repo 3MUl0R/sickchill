@@ -219,7 +219,7 @@ class TestShouldUseAIFallback(unittest.TestCase):
     """Test the decision logic for when to use AI fallback."""
 
     def setUp(self):
-        """Set up test with mocked settings."""
+        """Set up test with mocked settings and preferences."""
         self.settings_patcher = mock.patch("sickchill.oldbeard.ai.search_advisor.settings")
         self.mock_settings = self.settings_patcher.start()
 
@@ -228,12 +228,24 @@ class TestShouldUseAIFallback(unittest.TestCase):
         self.mock_settings.AI_SEARCH_ONLY_ON_FAILURE = True
         self.mock_settings.AI_SEARCH_MIN_RESULTS = 1
 
+        # Mock preferences manager
+        self.prefs_patcher = mock.patch("sickchill.oldbeard.ai.search_advisor.get_preferences_manager")
+        self.mock_get_prefs = self.prefs_patcher.start()
+        self.mock_prefs_manager = mock.MagicMock()
+        self.mock_get_prefs.return_value = self.mock_prefs_manager
+        # Default: preferences manager allows AI search
+        self.mock_prefs_manager.should_use_ai_search.return_value = True
+
     def tearDown(self):
         """Clean up patches."""
         self.settings_patcher.stop()
+        self.prefs_patcher.stop()
 
     def test_should_not_use_when_result_found(self):
         """Test that AI is not used when pick_best_result returned a result."""
+        # When we have a result, preferences manager should return False
+        self.mock_prefs_manager.should_use_ai_search.return_value = False
+
         results = [MockSearchResult()]
         show = MockTVShow()
         picked_result = MockSearchResult()
@@ -258,7 +270,7 @@ class TestShouldUseAIFallback(unittest.TestCase):
 
     def test_should_not_use_when_ai_disabled(self):
         """Test that AI is not used when AI is disabled."""
-        self.mock_settings.AI_ENABLED = False
+        self.mock_prefs_manager.should_use_ai_search.return_value = False
 
         results = [MockSearchResult()]
         show = MockTVShow()
@@ -268,7 +280,7 @@ class TestShouldUseAIFallback(unittest.TestCase):
 
     def test_should_not_use_when_search_ai_disabled(self):
         """Test that AI is not used when AI search specifically is disabled."""
-        self.mock_settings.AI_SEARCH_ENABLED = False
+        self.mock_prefs_manager.should_use_ai_search.return_value = False
 
         results = [MockSearchResult()]
         show = MockTVShow()

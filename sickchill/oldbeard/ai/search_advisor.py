@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from sickchill import settings
 from sickchill.oldbeard import db, show_name_helpers, ui
-from sickchill.oldbeard.ai import get_client, get_throttle, is_ai_available
+from sickchill.oldbeard.ai import get_client, get_feedback_manager, get_preferences_manager, get_throttle, is_ai_available
 from sickchill.oldbeard.common import Quality
 
 if TYPE_CHECKING:
@@ -348,6 +348,8 @@ def analyze_search_results(
             prompt=prompt,
             system_prompt=system_prompt,
             max_tokens=512,
+            cost_context="search",
+            cost_scope_key=str(show.indexerid),
         )
 
         # Commit the attempt now that API call succeeded
@@ -371,8 +373,9 @@ def analyze_search_results(
             _notify_ai_fallback_failure(show.name, episode_info, "AI returned an invalid selection")
             return None
 
-        # Check confidence threshold
-        confidence_threshold = settings.AI_CONFIDENCE_THRESHOLD
+        # Check confidence threshold (per-show or global)
+        prefs_manager = get_preferences_manager()
+        confidence_threshold = prefs_manager.get_confidence_threshold(show)
         if confidence < confidence_threshold:
             reason = f"AI confidence too low ({confidence:.0%})"
             logger.info(
@@ -413,6 +416,23 @@ def analyze_search_results(
         # Record success
         throttle.record_search_success(show)
 
+        # Record decision for feedback tracking
+        try:
+            from sickchill.oldbeard.ai.feedback import DecisionType
+
+            feedback_mgr = get_feedback_manager()
+            feedback_mgr.record_decision(
+                decision_type=DecisionType.SEARCH_SELECTION,
+                input_summary=f"{len(results)} results for {show.name} {episode_info}",
+                output_summary=f"Selected #{selected_index}: {selected_result.name[:100]}",
+                confidence=confidence,
+                reasoning=reasoning,
+                raw_response=response,
+                show_id=show.indexerid,
+            )
+        except Exception as e:
+            logger.debug(f"Failed to record AI decision: {e}")
+
         return selected_result
 
     except Exception as e:
@@ -443,20 +463,8 @@ def should_use_ai_fallback(
     Returns:
         True if AI fallback should be attempted
     """
-    # Only use AI when rule-based picker failed (if AI_SEARCH_ONLY_ON_FAILURE is True)
-    if settings.AI_SEARCH_ONLY_ON_FAILURE and picked_result is not None:
-        return False
-
-    # If not in "only on failure" mode, but we already have a result, skip AI
-    if picked_result is not None:
-        return False
-
     # Must have results to analyze
     if not results:
-        return False
-
-    # AI must be enabled and configured
-    if not settings.AI_ENABLED or not settings.AI_SEARCH_ENABLED:
         return False
 
     # Check minimum results threshold
@@ -466,4 +474,7 @@ def should_use_ai_fallback(
         )
         return False
 
-    return True
+    # Check per-show preferences (handles global settings too)
+    prefs_manager = get_preferences_manager()
+    has_result = picked_result is not None
+    return prefs_manager.should_use_ai_search(show, has_result)

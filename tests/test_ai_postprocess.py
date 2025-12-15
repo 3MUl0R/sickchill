@@ -199,7 +199,7 @@ class TestShouldUseAIMatch(unittest.TestCase):
     """Test the should_use_ai_match function."""
 
     def setUp(self):
-        """Set up test with mocked settings."""
+        """Set up test with mocked settings and preferences."""
         self.settings_patcher = mock.patch("sickchill.oldbeard.ai.postprocess_matcher.settings")
         self.mock_settings = self.settings_patcher.start()
 
@@ -207,9 +207,18 @@ class TestShouldUseAIMatch(unittest.TestCase):
         self.mock_settings.AI_POSTPROCESS_MATCH_ENABLED = True
         self.mock_settings.AI_POSTPROCESS_MATCH_ONLY_ON_FAILURE = True
 
+        # Mock preferences manager
+        self.prefs_patcher = mock.patch("sickchill.oldbeard.ai.postprocess_matcher.get_preferences_manager")
+        self.mock_get_prefs = self.prefs_patcher.start()
+        self.mock_prefs_manager = mock.MagicMock()
+        self.mock_get_prefs.return_value = self.mock_prefs_manager
+        # Default: preferences manager allows AI postprocess
+        self.mock_prefs_manager.should_use_ai_postprocess.return_value = True
+
     def tearDown(self):
         """Clean up patches."""
         self.settings_patcher.stop()
+        self.prefs_patcher.stop()
 
     def test_should_not_use_when_disabled(self):
         """Test that AI is not used when disabled."""
@@ -252,6 +261,9 @@ class TestShouldUseAIMatch(unittest.TestCase):
     def test_should_not_use_when_complete(self):
         """Test that AI is not used when complete info available."""
         from sickchill.oldbeard.ai.postprocess_matcher import should_use_ai_match
+
+        # When complete info is available, preferences manager returns False
+        self.mock_prefs_manager.should_use_ai_postprocess.return_value = False
 
         show = MockTVShow()
 
