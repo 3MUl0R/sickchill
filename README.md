@@ -35,11 +35,13 @@ Issue/Bug tracking, feature requests, support, and developer communication is mo
  - Automatic subtitles matching and downloading
  - Improved failed download handling
  - DupeKey/DupeScore for NZBGet 12+
+ - AI Assistant - Optional AI-powered fallback for search selection and file matching using Anthropic Claude (BYOK)
  - Real SSL certificate validation
  - Supports Anime shows
 
 ### Important Links
 * [Installation & Configuration](https://github.com/SickChill/SickChill/wiki/Installation-&-Configuration-Guides)
+* [AI Assistant Guide](AI_ASSISTANT_GUIDE.md)
 * [Wiki](https://github.com/SickChill/SickChill/wiki)
 * [FAQ](https://github.com/SickChill/SickChill/wiki/FAQ%27s-and-Fixes)
 * [Issue Tracker](https://discord.gg/FXre9qkHwE)
