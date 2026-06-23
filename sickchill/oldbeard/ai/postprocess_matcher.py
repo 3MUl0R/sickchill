@@ -339,15 +339,17 @@ def match_file(
         # Get file fingerprint for cost tracking
         file_fingerprint = throttle.get_file_fingerprint(file_path)
 
-        response = client.analyze(
+        response, was_cached = client.analyze(
             prompt=prompt,
             max_tokens=512,
             cost_context="postprocess",
             cost_scope_key=file_fingerprint,
+            return_meta=True,
         )
 
-        # Commit the attempt now that API call succeeded
-        throttle.commit_postprocess_attempt(file_path)
+        # Commit the attempt: a cache hit still records the cooldown but must not bill the
+        # hourly/daily call budget (no API call was made).
+        throttle.commit_postprocess_attempt(file_path, count_budget=not was_cached)
 
         # Validate response
         is_valid, rejection_reason = _validate_match_result(response, candidates)

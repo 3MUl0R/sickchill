@@ -191,19 +191,21 @@ class ThrottleManager:
             logger.debug(f"AI search reservation created for {show.name}")
             return True
 
-    def commit_search_attempt(self, show) -> None:
+    def commit_search_attempt(self, show, count_budget: bool = True) -> None:
         """
-        Commit a reserved search attempt after successful API call.
+        Commit a reserved search attempt after a successful response.
 
         This records the attempt in the database and releases the reservation.
 
         Args:
             show: TVShow object
+            count_budget: Pass False when the response came from the cache (no API call), so
+                the cooldown is recorded but the call budget is not consumed.
         """
         scope_key = str(show.indexerid)
 
         # Record the attempt in database
-        self.record_attempt(self.CONTEXT_SEARCH, self.SCOPE_SHOW, scope_key)
+        self.record_attempt(self.CONTEXT_SEARCH, self.SCOPE_SHOW, scope_key, count_budget=count_budget)
 
         # Release the reservation
         with self._budget_lock:
@@ -312,19 +314,21 @@ class ThrottleManager:
             logger.debug("AI post-process reservation created for file")
             return True
 
-    def commit_postprocess_attempt(self, file_path: str) -> None:
+    def commit_postprocess_attempt(self, file_path: str, count_budget: bool = True) -> None:
         """
-        Commit a reserved post-process attempt after successful API call.
+        Commit a reserved post-process attempt after a successful response.
 
         This records the attempt in the database and releases the reservation.
 
         Args:
             file_path: Path to the file
+            count_budget: Pass False when the response came from the cache (no API call), so
+                the cooldown is recorded but the call budget is not consumed.
         """
         scope_key = self.get_file_fingerprint(file_path)
 
         # Record the attempt in database
-        self.record_attempt(self.CONTEXT_POSTPROCESS, self.SCOPE_FILE, scope_key)
+        self.record_attempt(self.CONTEXT_POSTPROCESS, self.SCOPE_FILE, scope_key, count_budget=count_budget)
 
         # Release the reservation
         with self._budget_lock:
@@ -349,7 +353,7 @@ class ThrottleManager:
 
         logger.debug("AI post-process reservation released for file")
 
-    def record_attempt(self, context: str, scope: str, scope_key: str) -> None:
+    def record_attempt(self, context: str, scope: str, scope_key: str, count_budget: bool = True) -> None:
         """
         Record that an AI request was attempted.
 
@@ -357,6 +361,10 @@ class ThrottleManager:
             context: "search" or "postprocess"
             scope: "show" or "file"
             scope_key: Show ID or file fingerprint
+            count_budget: When True (default) the call counts against the hourly/daily call
+                budget. Pass False for a free response-cache hit: the cooldown timestamp is
+                still recorded (so a cached negative result does not re-fire every cycle) but
+                no real API call was made, so it must not consume the budget.
         """
         now = time.time()
         cache_db = self._get_db()
@@ -373,12 +381,13 @@ class ThrottleManager:
             [context, scope, scope_key, now, context, scope, scope_key],
         )
 
-        # Track in-memory budget counters (thread-safe)
-        with self._budget_lock:
-            self._hourly_calls.append(now)
-            self._daily_calls.append(now)
+        # Track in-memory budget counters (thread-safe) only for real (non-cached) calls.
+        if count_budget:
+            with self._budget_lock:
+                self._hourly_calls.append(now)
+                self._daily_calls.append(now)
 
-        logger.debug(f"AI request recorded: {context}/{scope}/{scope_key[:20]}...")
+        logger.debug(f"AI request recorded: {context}/{scope}/{scope_key[:20]}... (budget={count_budget})")
 
     def record_success(self, context: str, scope: str, scope_key: str) -> None:
         """

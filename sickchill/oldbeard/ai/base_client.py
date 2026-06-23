@@ -112,7 +112,8 @@ class BaseAIClient:
         cost_context: Optional[str] = None,
         cost_scope_key: Optional[str] = None,
         use_cache: bool = True,
-    ) -> Dict[str, Any]:
+        return_meta: bool = False,
+    ) -> Any:
         """
         Send an analysis request to Claude and parse the JSON response.
 
@@ -127,9 +128,12 @@ class BaseAIClient:
             cost_context: Context for cost tracking ("search" or "postprocess")
             cost_scope_key: Scope key for cost tracking (show ID or file fingerprint)
             use_cache: Whether to check/store in response cache (default: True)
+            return_meta: When True, return ``(response, was_cached)`` so the caller can avoid
+                billing a free cache hit against the call budget. When False (default), return
+                just the response dict (backwards-compatible).
 
         Returns:
-            Parsed JSON response as a dictionary
+            The parsed JSON response dict, or ``(response, was_cached)`` if ``return_meta``.
 
         Raises:
             AIConfigurationError: If client is not properly configured
@@ -150,7 +154,7 @@ class BaseAIClient:
             cached_response = self._check_cache(prompt, context, system_prompt, max_tokens, cost_context, cost_scope_key)
             if cached_response is not None:
                 logger.debug("Returning cached AI response")
-                return cached_response
+                return (cached_response, True) if return_meta else cached_response
             # Generate hash for later caching
             request_hash = self._generate_cache_hash(prompt, context, system_prompt, max_tokens)
 
@@ -169,7 +173,7 @@ class BaseAIClient:
                 if use_cache and request_hash:
                     self._store_cache(request_hash, response, cost_context, cost_scope_key)
 
-                return response
+                return (response, False) if return_meta else response
 
             except AIConfigurationError:
                 # Don't retry auth errors

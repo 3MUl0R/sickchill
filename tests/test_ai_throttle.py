@@ -183,6 +183,31 @@ class TestBudgetTracking(unittest.TestCase):
         self.assertEqual(status["hourly_used"], 1)
         self.assertEqual(status["daily_used"], 1)
 
+    def test_count_budget_false_records_cooldown_but_not_budget(self):
+        """A cache hit (count_budget=False) records the cooldown but does not bill the budget."""
+        manager = ThrottleManager()
+
+        manager.record_attempt("search", "show", "12345", count_budget=False)
+
+        # Budget counters untouched...
+        status = manager.get_budget_status()
+        self.assertEqual(status["hourly_used"], 0)
+        self.assertEqual(status["daily_used"], 0)
+        # ...but the cooldown (last_attempt) was still written to the throttle table.
+        self.mock_db.DBConnection.return_value.action.assert_called()
+
+    def test_commit_search_attempt_count_budget_passthrough(self):
+        """commit_search_attempt(count_budget=False) does not consume the call budget."""
+        manager = ThrottleManager()
+        show = mock.MagicMock()
+        show.indexerid = 999
+
+        manager.commit_search_attempt(show, count_budget=False)
+        self.assertEqual(manager.get_budget_status()["hourly_used"], 0)
+
+        manager.commit_search_attempt(show, count_budget=True)
+        self.assertEqual(manager.get_budget_status()["hourly_used"], 1)
+
     def test_budget_limit_blocks(self):
         """Test that exceeding budget limit returns False."""
         self.mock_settings.AI_MAX_CALLS_PER_HOUR = 2

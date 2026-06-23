@@ -423,5 +423,41 @@ class TestRetryLogic(unittest.TestCase):
         self.assertEqual(mock_make_request.call_count, MAX_RETRIES)
 
 
+class TestAnalyzeReturnMeta(unittest.TestCase):
+    """analyze(return_meta=True) signals cache hits so callers can skip the call budget."""
+
+    @mock.patch("sickchill.oldbeard.ai.anthropic_client.AnthropicClient._make_request")
+    def test_return_meta_real_call(self, mock_make_request):
+        """A real (non-cached) call returns (response, was_cached=False)."""
+        mock_make_request.return_value = ({"selected_index": 0}, None)
+        client = AnthropicClient(api_key="test-key")
+
+        result = client.analyze("prompt", use_cache=False, return_meta=True)
+
+        self.assertEqual(result, ({"selected_index": 0}, False))
+
+    @mock.patch("sickchill.oldbeard.ai.anthropic_client.AnthropicClient._make_request")
+    def test_default_returns_bare_dict(self, mock_make_request):
+        """Without return_meta the return type stays a bare dict (back-compatible)."""
+        mock_make_request.return_value = ({"selected_index": 0}, None)
+        client = AnthropicClient(api_key="test-key")
+
+        result = client.analyze("prompt", use_cache=False)
+
+        self.assertEqual(result, {"selected_index": 0})
+
+    @mock.patch("sickchill.oldbeard.ai.anthropic_client.AnthropicClient._make_request")
+    @mock.patch("sickchill.oldbeard.ai.base_client.BaseAIClient._check_cache")
+    def test_return_meta_cache_hit(self, mock_check_cache, mock_make_request):
+        """A cache hit returns (cached_response, was_cached=True) and makes no real request."""
+        mock_check_cache.return_value = {"selected_index": 2}
+        client = AnthropicClient(api_key="test-key")
+
+        result = client.analyze("prompt", return_meta=True)
+
+        self.assertEqual(result, ({"selected_index": 2}, True))
+        mock_make_request.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

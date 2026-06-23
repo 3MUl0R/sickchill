@@ -65,6 +65,16 @@ class TestMatchFileFunction(unittest.TestCase):
         self.mock_client = mock.MagicMock()
         self.mock_get_client.return_value = self.mock_client
 
+        # analyze() supports return_meta=True -> (response, was_cached). Adapt each test's
+        # configured return_value (a bare dict, or an explicit (response, cached) tuple) to it.
+        def _analyze_side_effect(*args, **kwargs):
+            rv = self.mock_client.analyze.return_value
+            if kwargs.get("return_meta"):
+                return rv if isinstance(rv, tuple) else (rv, False)
+            return rv[0] if isinstance(rv, tuple) else rv
+
+        self.mock_client.analyze.side_effect = _analyze_side_effect
+
         # Mock candidate shows
         self.candidates_patcher = mock.patch("sickchill.oldbeard.ai.postprocess_matcher._get_candidate_shows")
         self.mock_get_candidates = self.candidates_patcher.start()
@@ -147,6 +157,22 @@ class TestMatchFileFunction(unittest.TestCase):
         self.assertEqual(result["show_indexer_id"], 12345)
         self.assertEqual(result["season"], 1)
         self.assertEqual(result["episodes"], [5])
+
+    def test_cache_hit_does_not_bill_budget(self):
+        """A cached match still commits the cooldown but with count_budget=False."""
+        from sickchill.oldbeard.ai.postprocess_matcher import match_file
+
+        # Explicit (response, was_cached=True) tuple simulates a response-cache hit.
+        self.mock_client.analyze.return_value = (
+            {"show_indexer_id": 12345, "season": 1, "episodes": [5], "confidence": 0.95, "reasoning": "cached"},
+            True,
+        )
+
+        result = match_file("/path/to/file.mkv", "Test.Show.S01E05.mkv", "Test Show")
+
+        self.assertIsNotNone(result)
+        self.mock_throttle.commit_postprocess_attempt.assert_called_once()
+        self.assertFalse(self.mock_throttle.commit_postprocess_attempt.call_args.kwargs["count_budget"])
 
     def test_returns_none_when_ai_cant_match(self):
         """Test that None is returned when AI can't identify file."""
@@ -496,6 +522,16 @@ class TestAnalyzeFile(unittest.TestCase):
         self.mock_client = mock.MagicMock()
         self.mock_get_client.return_value = self.mock_client
 
+        # analyze() supports return_meta=True -> (response, was_cached). Adapt each test's
+        # configured return_value (a bare dict, or an explicit (response, cached) tuple) to it.
+        def _analyze_side_effect(*args, **kwargs):
+            rv = self.mock_client.analyze.return_value
+            if kwargs.get("return_meta"):
+                return rv if isinstance(rv, tuple) else (rv, False)
+            return rv[0] if isinstance(rv, tuple) else rv
+
+        self.mock_client.analyze.side_effect = _analyze_side_effect
+
         # Mock template
         self.template_patcher = mock.patch("sickchill.oldbeard.ai.postprocess_analyzer._load_prompt_template")
         self.mock_template = self.template_patcher.start()
@@ -556,6 +592,32 @@ class TestAnalyzeFile(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertTrue(result["quality_verified"])
         self.assertTrue(result["proceed_with_processing"])
+
+    def test_cache_hit_does_not_bill_budget(self):
+        """A cached analysis still commits the cooldown but with count_budget=False."""
+        from sickchill.oldbeard.ai.postprocess_analyzer import analyze_file
+
+        # Explicit (response, was_cached=True) tuple simulates a response-cache hit.
+        self.mock_client.analyze.return_value = (
+            {
+                "quality_verified": True,
+                "quality_assessment": "cached",
+                "issues": [],
+                "proceed_with_processing": True,
+                "confidence": 0.95,
+                "notes": "",
+            },
+            True,
+        )
+
+        show = MockTVShow()
+        episode = MockTVEpisode(show=show)
+
+        result = analyze_file("/path/to/file.mkv", episode, 4)
+
+        self.assertIsNotNone(result)
+        self.mock_throttle.commit_postprocess_attempt.assert_called_once()
+        self.assertFalse(self.mock_throttle.commit_postprocess_attempt.call_args.kwargs["count_budget"])
 
     def test_returns_issues_when_detected(self):
         """Test that issues are returned when detected."""

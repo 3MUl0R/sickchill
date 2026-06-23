@@ -430,6 +430,17 @@ class TestAnalyzeResults(unittest.TestCase):
         self.mock_client = mock.MagicMock()
         self.mock_get_client.return_value = self.mock_client
 
+        # analyze() supports return_meta=True -> (response, was_cached). Adapt each test's
+        # configured return_value (a bare response dict, or an explicit (response, cached)
+        # tuple for cache-hit tests) to that contract without rewriting every dict literal.
+        def _analyze_side_effect(*args, **kwargs):
+            rv = self.mock_client.analyze.return_value
+            if kwargs.get("return_meta"):
+                return rv if isinstance(rv, tuple) else (rv, False)
+            return rv[0] if isinstance(rv, tuple) else rv
+
+        self.mock_client.analyze.side_effect = _analyze_side_effect
+
         # Mock prompt template loading
         self.load_template_patcher = mock.patch("sickchill.oldbeard.ai.search_advisor._load_prompt_template")
         self.mock_load_template = self.load_template_patcher.start()
@@ -506,6 +517,27 @@ class TestAnalyzeResults(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(result.name, "Result1")
+
+    def test_cache_hit_does_not_bill_budget(self):
+        """A cached selection still commits the cooldown but with count_budget=False."""
+        show = MockTVShow()
+        results = [
+            MockSearchResult(name="Result0", show=show),
+            MockSearchResult(name="Result1", show=show),
+        ]
+        episode = MockTVEpisode(show=show)
+
+        # Explicit (response, was_cached=True) tuple simulates a response-cache hit.
+        self.mock_client.analyze.return_value = (
+            {"selected_index": 1, "confidence": 0.95, "reasoning": "cached"},
+            True,
+        )
+
+        result = analyze_search_results(results, episode)
+
+        self.assertIsNotNone(result)
+        self.mock_throttle.commit_search_attempt.assert_called_once()
+        self.assertFalse(self.mock_throttle.commit_search_attempt.call_args.kwargs["count_budget"])
 
     def test_returns_none_when_ai_rejects_all(self):
         """Test that None is returned when AI finds no acceptable result."""

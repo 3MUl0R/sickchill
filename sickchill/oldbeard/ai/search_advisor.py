@@ -336,16 +336,18 @@ def analyze_search_results(
 
         logger.info(f"AI analyzing {len(results)} search results for {show.name} {episode_info}")
 
-        response = client.analyze(
+        response, was_cached = client.analyze(
             prompt=prompt,
             system_prompt=system_prompt,
             max_tokens=512,
             cost_context="search",
             cost_scope_key=str(show.indexerid),
+            return_meta=True,
         )
 
-        # Commit the attempt now that API call succeeded
-        throttle.commit_search_attempt(show)
+        # Commit the attempt: a cache hit still records the cooldown (so a cached negative does
+        # not re-notify every cycle) but must not bill the hourly/daily call budget.
+        throttle.commit_search_attempt(show, count_budget=not was_cached)
 
         # Parse response
         selected_index = response.get("selected_index", -1)
