@@ -41,6 +41,10 @@ def _get_ai_fallback_result(results, episode, is_failed_retry=False):
 
             _ai_search_advisor = search_advisor
 
+        # This seam is failure-only: it is reached only after pick_best_result() returned None,
+        # so picked_result is always None here. As a result AI_SEARCH_ONLY_ON_FAILURE=False and
+        # the per-show ai_search_always override have no effect today (they would only matter if
+        # AI were also consulted when a rule-based result was found). See should_use_ai_search.
         if not _ai_search_advisor.should_use_ai_fallback(results, episode.show, None):
             return None
 

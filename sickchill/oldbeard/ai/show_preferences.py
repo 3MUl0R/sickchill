@@ -252,6 +252,12 @@ class ShowPreferencesManager:
         if prefs.ai_search_disabled:
             return False
 
+        # NOTE: The current search integration only calls AI as a fallback after rule-based
+        # selection fails, so it always passes has_result=False (see search._get_ai_fallback_result).
+        # That means the ai_search_always branch and the AI_SEARCH_ONLY_ON_FAILURE=False path below
+        # never change the outcome in practice; they only matter if AI is later consulted when a
+        # rule-based result was found. The logic is kept (and unit-tested) for that future case.
+
         # Check if AI should always be used for this show
         if prefs.ai_search_always:
             return True
@@ -284,6 +290,12 @@ class ShowPreferencesManager:
         # Check if AI post-process is disabled for this show
         if prefs.ai_postprocess_disabled:
             return False
+
+        # NOTE: like search, the post-process matcher only invokes AI as a fallback after
+        # standard parsing fails, and the seam calls should_use_ai_match(None, None, []) before
+        # the show is known (see postProcessor._get_ai_match_result). So has_match is effectively
+        # always False here and the ai_postprocess_always / AI_POSTPROCESS_MATCH_ONLY_ON_FAILURE=False
+        # branches do not change the outcome today; kept (and unit-tested) for a future "always" mode.
 
         # Check if AI should always be used for this show
         if prefs.ai_postprocess_always:

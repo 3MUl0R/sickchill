@@ -87,9 +87,14 @@ AI_CACHE_TTL_DAYS = 30
 
 # AI Search (Fallback) Settings
 AI_SEARCH_ENABLED = False
+# NOTE: AI search only runs as a fallback after rule-based selection fails, so
+# AI_SEARCH_ONLY_ON_FAILURE=False does not currently enable "always consult AI" (see
+# show_preferences.should_use_ai_search). Kept persisted for forward-compat.
 AI_SEARCH_ONLY_ON_FAILURE = True
 AI_SEARCH_COOLDOWN_DAYS_PER_SHOW = 7
 AI_SEARCH_MIN_RESULTS = 1
+# Reserved: an AI error already falls through to "no result" without blocking, so this flag is
+# not currently read by any logic (only persisted/exposed in the UI).
 AI_SEARCH_FALLBACK_TO_RULES_ON_ERROR = True
 AI_SEARCH_ALLOW_RELAX_FILTERS = False
 

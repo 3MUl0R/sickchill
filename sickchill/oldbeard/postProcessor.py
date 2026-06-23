@@ -59,6 +59,10 @@ def _get_ai_match_result(file_path, filename, folder_name, release_name=None):
 
             _ai_postprocess_matcher = postprocess_matcher
 
+        # Failure-only seam: reached only after standard parsing could not identify the file, and
+        # the show is not known yet, so we pass (None, None, []). Per-show postprocess preferences
+        # and AI_POSTPROCESS_MATCH_ONLY_ON_FAILURE=False therefore have no effect here today; see
+        # should_use_ai_postprocess.
         if not _ai_postprocess_matcher.should_use_ai_match(None, None, []):
             return None
 

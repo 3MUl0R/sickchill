@@ -257,6 +257,7 @@
                                         <input type="checkbox" name="ai_search_only_on_failure" id="ai_search_only_on_failure"
                                                ${checked(settings.AI_SEARCH_ONLY_ON_FAILURE)}/>
                                         <label for="ai_search_only_on_failure">${_('only use AI when rule-based selection fails (recommended)')}</label>
+                                        <p class="help-block">${_('AI search currently runs only as a fallback after rule-based selection fails, so this remains in effect regardless. Unchecking it has no effect until an "always consult AI" mode is added.')}</p>
                                     </div>
                                 </div>
 
@@ -292,6 +293,7 @@
                                         <input type="checkbox" name="ai_search_fallback_to_rules_on_error" id="ai_search_fallback_to_rules_on_error"
                                                ${checked(settings.AI_SEARCH_FALLBACK_TO_RULES_ON_ERROR)}/>
                                         <label for="ai_search_fallback_to_rules_on_error">${_('if AI fails, continue with no result rather than blocking')}</label>
+                                        <p class="help-block">${_('This is already the default behavior (an AI error never blocks the search); the toggle is reserved for future use.')}</p>
                                     </div>
                                 </div>
 
@@ -345,6 +347,7 @@
                                         <input type="checkbox" name="ai_postprocess_match_only_on_failure" id="ai_postprocess_match_only_on_failure"
                                                ${checked(settings.AI_POSTPROCESS_MATCH_ONLY_ON_FAILURE)}/>
                                         <label for="ai_postprocess_match_only_on_failure">${_('only use AI when standard parsing fails (recommended)')}</label>
+                                        <p class="help-block">${_('AI matching currently runs only as a fallback after standard parsing fails, so this remains in effect regardless. Unchecking it has no effect until an "always consult AI" mode is added.')}</p>
                                     </div>
                                 </div>
 
