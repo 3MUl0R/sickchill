@@ -35,7 +35,7 @@ Issue/Bug tracking, feature requests, support, and developer communication is mo
  - Automatic subtitles matching and downloading
  - Improved failed download handling
  - DupeKey/DupeScore for NZBGet 12+
- - AI Assistant - Optional AI-powered fallback for search selection and file matching using Anthropic Claude (BYOK)
+ - AI Assistant - Optional AI-powered fallback for search selection and file matching using Anthropic Claude (via an API key, or a locally logged-in Claude Code CLI)
  - Real SSL certificate validation
  - Supports Anime shows
 

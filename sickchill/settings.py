@@ -69,9 +69,16 @@ AI_REQUEST_TIMEOUT = 30
 AI_CONFIDENCE_THRESHOLD = 0.80
 AI_NOTIFY_ON_FALLBACK_FAILURE = True
 
+# AI Provider selection: "api" (Anthropic API key / BYOK) or "cli" (local Claude Code CLI login)
+AI_PROVIDER = "api"
+
 # Anthropic API Settings
 ANTHROPIC_API_KEY = None
 ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
+
+# Claude Code CLI provider settings (used when AI_PROVIDER == "cli")
+AI_CLI_PATH = ""  # optional explicit path to the `claude` binary ("" = auto-detect on PATH)
+AI_CLI_MODEL = "sonnet"  # model alias ("sonnet"/"opus"/"haiku") or a full model id
 
 # AI Throttling / Budgeting
 AI_MAX_CALLS_PER_HOUR = 20

@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from sickchill.oldbeard.ai.anthropic_client import AnthropicClient
+    from sickchill.oldbeard.ai.base_client import BaseAIClient
     from sickchill.oldbeard.ai.batch import BatchProcessor
     from sickchill.oldbeard.ai.cost_tracker import CostTracker
     from sickchill.oldbeard.ai.feedback import FeedbackManager
@@ -37,26 +37,44 @@ __all__ = [
 
 # Module-level singleton instances for client and throttle (core AI functionality)
 # These don't have module-level getters in their respective modules
-_client: Optional["AnthropicClient"] = None
+_client: Optional["BaseAIClient"] = None
 _throttle: Optional["ThrottleManager"] = None
 
 
-def get_client() -> Optional["AnthropicClient"]:
+def get_client() -> Optional["BaseAIClient"]:
     """
-    Get the singleton AnthropicClient instance.
-    Returns None if AI is not configured.
+    Get the singleton AI client for the configured provider.
+
+    Returns None if AI is disabled, or (for the API provider) if no API key is set.
+    For the CLI provider, the client is created whenever AI is enabled; readiness
+    (binary present + logged in) is checked lazily via is_configured().
     """
+    from sickchill import settings
+
+    # Checked on every call so toggling AI off takes effect without an explicit reset.
+    if not settings.AI_ENABLED:
+        return None
+
     global _client
     if _client is None:
-        from sickchill import settings
-        from sickchill.oldbeard.ai.anthropic_client import AnthropicClient
+        provider = (settings.AI_PROVIDER or "api").lower()
+        if provider == "cli":
+            from sickchill.oldbeard.ai.cli_client import ClaudeCLIClient
 
-        if settings.AI_ENABLED and settings.ANTHROPIC_API_KEY:
-            _client = AnthropicClient(
-                api_key=settings.ANTHROPIC_API_KEY,
-                model=settings.ANTHROPIC_MODEL,
-                timeout=settings.AI_REQUEST_TIMEOUT,
+            _client = ClaudeCLIClient(
+                model=settings.AI_CLI_MODEL,
+                timeout=max(int(settings.AI_REQUEST_TIMEOUT), 60),
+                cli_path=settings.AI_CLI_PATH,
             )
+        else:
+            from sickchill.oldbeard.ai.anthropic_client import AnthropicClient
+
+            if settings.ANTHROPIC_API_KEY:
+                _client = AnthropicClient(
+                    api_key=settings.ANTHROPIC_API_KEY,
+                    model=settings.ANTHROPIC_MODEL,
+                    timeout=settings.AI_REQUEST_TIMEOUT,
+                )
     return _client
 
 
@@ -75,9 +93,17 @@ def get_throttle() -> "ThrottleManager":
 def reset_client() -> None:
     """
     Reset the client instance (e.g., after settings change).
+
+    Also clears the CLI auth-status cache so a provider/path change is re-probed.
     """
     global _client
     _client = None
+    try:
+        from sickchill.oldbeard.ai.cli_client import _reset_auth_cache
+
+        _reset_auth_cache()
+    except Exception:
+        pass
 
 
 def get_cost_tracker() -> "CostTracker":

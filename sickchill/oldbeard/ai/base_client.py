@@ -70,6 +70,11 @@ class BaseAIClient:
     across providers.
     """
 
+    # Identifies the provider for cache-key namespacing (overridden by subclasses)
+    # so an API-key response and a CLI response for an otherwise-identical request
+    # never collide in the shared response cache.
+    PROVIDER = "base"
+
     DEFAULT_MAX_TOKENS = 1024
 
     model: str
@@ -236,9 +241,10 @@ class BaseAIClient:
         Returns:
             Hash string for cache key
         """
-        # Build cache key components including model, system_prompt, and max_tokens
-        # to ensure different configurations get different cache entries
+        # Build cache key components including provider, model, system_prompt, and
+        # max_tokens to ensure different configurations get different cache entries
         cache_parts = [
+            self.PROVIDER,
             prompt,
             self.model,
             str(max_tokens),

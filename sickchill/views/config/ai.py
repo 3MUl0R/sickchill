@@ -95,6 +95,9 @@ class ConfigAI(Config):
         old_api_key = settings.ANTHROPIC_API_KEY
         old_model = settings.ANTHROPIC_MODEL
         old_timeout = settings.AI_REQUEST_TIMEOUT
+        old_provider = settings.AI_PROVIDER
+        old_cli_path = settings.AI_CLI_PATH
+        old_cli_model = settings.AI_CLI_MODEL
 
         # Master AI settings
         settings.AI_ENABLED = config.checkbox_to_value(self.get_body_argument("ai_enabled", default=None))
@@ -107,15 +110,37 @@ class ConfigAI(Config):
         )
         settings.AI_NOTIFY_ON_FALLBACK_FAILURE = config.checkbox_to_value(self.get_body_argument("ai_notify_on_fallback_failure", default=None))
 
-        # Anthropic API settings - use unhide() to handle hidden_value placeholder
-        settings.ANTHROPIC_API_KEY = filters.unhide(
-            settings.ANTHROPIC_API_KEY,
-            self.get_body_argument("anthropic_api_key", default=""),
-        )
+        # Provider selection
+        provider = self.get_body_argument("ai_provider", default="api")
+        settings.AI_PROVIDER = provider if provider in ("api", "cli") else "api"
+
+        # Anthropic API settings - use unhide() to handle the hidden_value placeholder.
+        # Never let an absent OR empty submission (e.g. the API panel hidden under the CLI
+        # provider) null a stored key: unhide("") returns None, so only overwrite when the
+        # resolved value is truthy (a real new key, or the placeholder resolving to old).
+        posted_api_key = self.get_body_argument("anthropic_api_key", default="")
+        resolved_api_key = filters.unhide(old_api_key, posted_api_key)
+        if resolved_api_key:
+            settings.ANTHROPIC_API_KEY = resolved_api_key
         settings.ANTHROPIC_MODEL = self.get_body_argument("anthropic_model", default="claude-sonnet-4-20250514")
 
-        # Reset client if API key, model, or timeout changed
-        if settings.ANTHROPIC_API_KEY != old_api_key or settings.ANTHROPIC_MODEL != old_model or settings.AI_REQUEST_TIMEOUT != old_timeout:
+        # Claude Code CLI provider settings. Only consume the path when the CLI panel is
+        # present (provider == "cli"): absent -> keep stored path, empty -> clear to auto-detect.
+        if settings.AI_PROVIDER == "cli":
+            posted_cli_path = self.get_body_argument("ai_cli_path", default=None)
+            if posted_cli_path is not None:
+                settings.AI_CLI_PATH = posted_cli_path.strip()
+        settings.AI_CLI_MODEL = self.get_body_argument("ai_cli_model", default=settings.AI_CLI_MODEL or "sonnet")
+
+        # Reset client if any provider-affecting setting changed
+        if (
+            settings.AI_PROVIDER != old_provider
+            or settings.ANTHROPIC_API_KEY != old_api_key
+            or settings.ANTHROPIC_MODEL != old_model
+            or settings.AI_REQUEST_TIMEOUT != old_timeout
+            or settings.AI_CLI_PATH != old_cli_path
+            or settings.AI_CLI_MODEL != old_cli_model
+        ):
             from sickchill.oldbeard.ai import reset_client
 
             reset_client()
@@ -186,6 +211,26 @@ class ConfigAI(Config):
         except Exception as e:
             logger.warning(f"API key test failed: {e}")
             # Escape exception text to prevent XSS
+            safe_error = html.escape(str(e))
+            return f"Error: {safe_error}"
+
+    def testClaudeCLI(self):
+        """Detect and test the local Claude Code CLI provider (binary + login + round-trip)."""
+        try:
+            from sickchill.oldbeard.ai.cli_client import ClaudeCLIClient
+
+            cli_path = self.get_body_argument("cli_path", default=settings.AI_CLI_PATH) or ""
+            model = self.get_body_argument("model", default=settings.AI_CLI_MODEL) or "sonnet"
+
+            client = ClaudeCLIClient(model=model, timeout=max(int(settings.AI_REQUEST_TIMEOUT), 30), cli_path=cli_path.strip())
+            success, message = client.test_connection()
+
+            # Escape the message to prevent XSS
+            safe_message = html.escape(str(message))
+            return f"Success: {safe_message}" if success else f"Failed: {safe_message}"
+
+        except Exception as e:
+            logger.warning(f"Claude CLI test failed: {e}")
             safe_error = html.escape(str(e))
             return f"Error: {safe_error}"
 

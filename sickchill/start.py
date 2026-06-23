@@ -482,8 +482,13 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
         settings.AI_CONFIDENCE_THRESHOLD = check_setting_float(settings.CFG, "AI", "ai_confidence_threshold", 0.80, min_val=0.0, max_val=1.0)
         settings.AI_NOTIFY_ON_FALLBACK_FAILURE = check_setting_bool(settings.CFG, "AI", "ai_notify_on_fallback_failure", True)
 
+        settings.AI_PROVIDER = check_setting_str(settings.CFG, "AI", "ai_provider", "api")
+
         settings.ANTHROPIC_API_KEY = check_setting_str(settings.CFG, "AI", "anthropic_api_key", censor_log=True)
         settings.ANTHROPIC_MODEL = check_setting_str(settings.CFG, "AI", "anthropic_model", "claude-sonnet-4-20250514")
+
+        settings.AI_CLI_PATH = check_setting_str(settings.CFG, "AI", "ai_cli_path", "")
+        settings.AI_CLI_MODEL = check_setting_str(settings.CFG, "AI", "ai_cli_model", "sonnet")
 
         settings.AI_MAX_CALLS_PER_HOUR = check_setting_int(settings.CFG, "AI", "ai_max_calls_per_hour", 20, min_val=1, max_val=100)
         settings.AI_MAX_CALLS_PER_DAY = check_setting_int(settings.CFG, "AI", "ai_max_calls_per_day", 200, min_val=1, max_val=1000)
@@ -1429,8 +1434,11 @@ def save_config():
                 "ai_request_timeout": int(settings.AI_REQUEST_TIMEOUT),
                 "ai_confidence_threshold": float(settings.AI_CONFIDENCE_THRESHOLD),
                 "ai_notify_on_fallback_failure": int(settings.AI_NOTIFY_ON_FALLBACK_FAILURE),
+                "ai_provider": settings.AI_PROVIDER,
                 "anthropic_api_key": settings.ANTHROPIC_API_KEY or "",
                 "anthropic_model": settings.ANTHROPIC_MODEL,
+                "ai_cli_path": settings.AI_CLI_PATH or "",
+                "ai_cli_model": settings.AI_CLI_MODEL,
                 "ai_max_calls_per_hour": int(settings.AI_MAX_CALLS_PER_HOUR),
                 "ai_max_calls_per_day": int(settings.AI_MAX_CALLS_PER_DAY),
                 "ai_cache_ttl_days": int(settings.AI_CACHE_TTL_DAYS),

@@ -50,6 +50,8 @@ class AnthropicClient(BaseAIClient):
     with proper error handling and logging.
     """
 
+    PROVIDER = "api"
+
     # Supported models with their display names
     SUPPORTED_MODELS = {
         "claude-sonnet-4-20250514": "Claude Sonnet 4 (Recommended)",

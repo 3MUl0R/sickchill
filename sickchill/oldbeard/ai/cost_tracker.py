@@ -24,6 +24,11 @@ MODEL_PRICING = {
         "input_per_million": 3.00,
         "output_per_million": 15.00,
     },
+    # Full model id the Claude Code CLI reports for the "sonnet" alias.
+    "claude-sonnet-4-6": {
+        "input_per_million": 3.00,
+        "output_per_million": 15.00,
+    },
     "claude-haiku-3-5-20241022": {
         "input_per_million": 0.25,
         "output_per_million": 1.25,

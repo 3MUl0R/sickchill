@@ -4,6 +4,7 @@
     from sickchill import settings
     from sickchill.oldbeard.filters import hide
     from sickchill.oldbeard.ai.anthropic_client import AnthropicClient
+    from sickchill.oldbeard.ai.cli_client import ClaudeCLIClient
 %>
 
 <%block name="tabs">
@@ -24,7 +25,7 @@
                     <div class="col-lg-3 col-md-4 col-sm-4 col-xs-12">
                         <div class="component-group-desc">
                             <h3>${_('AI Configuration')}</h3>
-                            <p>${_('Configure your Anthropic Claude API settings. AI features require a valid API key from')} <a href="https://console.anthropic.com/" target="_blank" rel="noreferrer noopener">Anthropic</a>.</p>
+                            <p>${_('Configure how SickChill reaches Claude: either an')} <a href="https://console.anthropic.com/" target="_blank" rel="noreferrer noopener">${_('Anthropic API key')}</a> ${_('or a locally installed, logged-in Claude Code CLI on the server.')}</p>
                             <p><b>${_('Note:')}</b> ${_('AI features are optional and only used as a fallback when rule-based logic fails.')}</p>
                         </div>
                     </div>
@@ -46,42 +47,104 @@
 
                                 <div class="field-pair row">
                                     <div class="col-lg-3 col-md-4 col-sm-5 col-xs-12">
-                                        <label class="component-title">${_('Anthropic API Key')}</label>
+                                        <label class="component-title">${_('AI Provider')}</label>
                                     </div>
                                     <div class="col-lg-9 col-md-8 col-sm-7 col-xs-12 component-desc">
-                                        <div class="row">
-                                            <div class="col-md-12">
-                                                <input type="password" name="anthropic_api_key" id="anthropic_api_key"
-                                                       value="${hide(settings.ANTHROPIC_API_KEY)}"
-                                                       class="form-control input-sm input350" autocapitalize="off"/>
-                                            </div>
-                                        </div>
-                                        <div class="row">
-                                            <div class="col-md-12">
-                                                <label for="anthropic_api_key">${_('your Anthropic API key from')} <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer noopener">console.anthropic.com</a></label>
-                                            </div>
-                                        </div>
-                                        <div class="row">
-                                            <div class="col-md-12">
-                                                <input type="button" class="btn" value="${_('Test API Key')}" id="testAnthropicKey"/>
-                                                <span id="testAnthropicKey-result"></span>
-                                            </div>
-                                        </div>
+                                        <select id="ai_provider" name="ai_provider" class="form-control input-sm input250">
+                                            <option value="api" ${selected(settings.AI_PROVIDER != "cli")}>${_('Anthropic API key (BYOK)')}</option>
+                                            <option value="cli" ${selected(settings.AI_PROVIDER == "cli")}>${_('Claude Code CLI (local login)')}</option>
+                                        </select>
+                                        <label for="ai_provider">${_('use an Anthropic API key, or a locally installed and logged-in Claude Code CLI (no API key needed)')}</label>
                                     </div>
                                 </div>
 
-                                <div class="field-pair row">
-                                    <div class="col-lg-3 col-md-4 col-sm-5 col-xs-12">
-                                        <label class="component-title">${_('AI Model')}</label>
+                                <div id="provider_api_settings" style="${'display: none;' if settings.AI_PROVIDER == 'cli' else ''}">
+
+                                    <div class="field-pair row">
+                                        <div class="col-lg-3 col-md-4 col-sm-5 col-xs-12">
+                                            <label class="component-title">${_('Anthropic API Key')}</label>
+                                        </div>
+                                        <div class="col-lg-9 col-md-8 col-sm-7 col-xs-12 component-desc">
+                                            <div class="row">
+                                                <div class="col-md-12">
+                                                    <input type="password" name="anthropic_api_key" id="anthropic_api_key"
+                                                           value="${hide(settings.ANTHROPIC_API_KEY)}"
+                                                           class="form-control input-sm input350" autocapitalize="off"/>
+                                                </div>
+                                            </div>
+                                            <div class="row">
+                                                <div class="col-md-12">
+                                                    <label for="anthropic_api_key">${_('your Anthropic API key from')} <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer noopener">console.anthropic.com</a></label>
+                                                </div>
+                                            </div>
+                                            <div class="row">
+                                                <div class="col-md-12">
+                                                    <input type="button" class="btn" value="${_('Test API Key')}" id="testAnthropicKey"/>
+                                                    <span id="testAnthropicKey-result"></span>
+                                                </div>
+                                            </div>
+                                        </div>
                                     </div>
-                                    <div class="col-lg-9 col-md-8 col-sm-7 col-xs-12 component-desc">
-                                        <select id="anthropic_model" name="anthropic_model" class="form-control input-sm input250">
-                                            % for model_id, model_name in AnthropicClient.SUPPORTED_MODELS.items():
-                                                <option value="${model_id}" ${selected(settings.ANTHROPIC_MODEL == model_id)}>${model_name}</option>
-                                            % endfor
-                                        </select>
-                                        <label for="anthropic_model">${_('Claude Sonnet 4 is recommended for best accuracy')}</label>
+
+                                    <div class="field-pair row">
+                                        <div class="col-lg-3 col-md-4 col-sm-5 col-xs-12">
+                                            <label class="component-title">${_('AI Model')}</label>
+                                        </div>
+                                        <div class="col-lg-9 col-md-8 col-sm-7 col-xs-12 component-desc">
+                                            <select id="anthropic_model" name="anthropic_model" class="form-control input-sm input250">
+                                                % for model_id, model_name in AnthropicClient.SUPPORTED_MODELS.items():
+                                                    <option value="${model_id}" ${selected(settings.ANTHROPIC_MODEL == model_id)}>${model_name}</option>
+                                                % endfor
+                                            </select>
+                                            <label for="anthropic_model">${_('Claude Sonnet 4 is recommended for best accuracy')}</label>
+                                        </div>
                                     </div>
+
+                                </div>
+
+                                <div id="provider_cli_settings" style="${'display: none;' if settings.AI_PROVIDER != 'cli' else ''}">
+
+                                    <div class="field-pair row">
+                                        <div class="col-lg-3 col-md-4 col-sm-5 col-xs-12">
+                                            <label class="component-title">${_('Claude CLI Path')}</label>
+                                        </div>
+                                        <div class="col-lg-9 col-md-8 col-sm-7 col-xs-12 component-desc">
+                                            <input type="text" name="ai_cli_path" id="ai_cli_path"
+                                                   value="${settings.AI_CLI_PATH or ''}"
+                                                   class="form-control input-sm input350" autocapitalize="off"/>
+                                            <label for="ai_cli_path">${_('optional: full path to the claude binary (leave blank to auto-detect on the server PATH)')}</label>
+                                        </div>
+                                    </div>
+
+                                    <div class="field-pair row">
+                                        <div class="col-lg-3 col-md-4 col-sm-5 col-xs-12">
+                                            <label class="component-title">${_('AI Model')}</label>
+                                        </div>
+                                        <div class="col-lg-9 col-md-8 col-sm-7 col-xs-12 component-desc">
+                                            <select id="ai_cli_model" name="ai_cli_model" class="form-control input-sm input250">
+                                                % for alias, model_name in ClaudeCLIClient.SUPPORTED_MODELS.items():
+                                                    <option value="${alias}" ${selected(settings.AI_CLI_MODEL == alias)}>${model_name}</option>
+                                                % endfor
+                                            </select>
+                                            <label for="ai_cli_model">${_('model alias passed to the CLI (the CLI also accepts full model ids)')}</label>
+                                        </div>
+                                    </div>
+
+                                    <div class="field-pair row">
+                                        <div class="col-lg-3 col-md-4 col-sm-5 col-xs-12">
+                                            <label class="component-title">${_('CLI Status')}</label>
+                                        </div>
+                                        <div class="col-lg-9 col-md-8 col-sm-7 col-xs-12 component-desc">
+                                            <input type="button" class="btn" value="${_('Detect / Test CLI')}" id="testClaudeCLI"/>
+                                            <span id="testClaudeCLI-result"></span>
+                                            <div class="row">
+                                                <div class="col-md-12">
+                                                    <label>${_('verifies the CLI is installed and logged in on the server (run "claude login" there if needed)')}</label>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
                                 </div>
 
                                 <div class="field-pair row">
@@ -461,6 +524,9 @@
                                         Claude Sonnet 4: $3/M input, $15/M output tokens<br/>
                                         Claude 3.5 Haiku: $0.25/M input, $1.25/M output tokens
                                     </p>
+                                    <p class="help-block">
+                                        <b>${_('Note:')}</b> ${_('When using the Claude Code CLI provider with a logged-in subscription, these dollar figures are API-equivalent estimates for reference only — calls are covered by your subscription and incur no per-call charge.')}
+                                    </p>
                                 </div>
                             </div>
 
@@ -483,6 +549,43 @@
 <%block name="scripts">
 <script type="text/javascript">
 $(document).ready(function() {
+    // Toggle provider-specific panels (inline display so it always overrides any
+    // server-rendered initial state regardless of theme CSS).
+    function updateProviderPanels() {
+        var cli = $('#ai_provider').val() === 'cli';
+        $('#provider_cli_settings').toggle(cli);
+        $('#provider_api_settings').toggle(!cli);
+    }
+    $('#ai_provider').on('change', updateProviderPanels);
+    updateProviderPanels();
+
+    // Detect / Test Claude Code CLI button
+    $('#testClaudeCLI').click(function() {
+        var btn = $(this);
+        var resultSpan = $('#testClaudeCLI-result');
+        var cliPath = $('#ai_cli_path').val();
+        var model = $('#ai_cli_model').val();
+
+        btn.prop('disabled', true);
+        resultSpan.html('<i class="fa fa-spinner fa-spin"></i> ' + ${json.dumps(_("Testing...")) | n});
+
+        $.post('${scRoot}/config/ai/testClaudeCLI', {
+            cli_path: cliPath,
+            model: model
+        }).done(function(data) {
+            var isSuccess = data.startsWith('Success');
+            var span = $('<span></span>').addClass(isSuccess ? 'text-success' : 'text-danger');
+            span.append($('<i></i>').addClass('fa fa-' + (isSuccess ? 'check' : 'times')));
+            span.append(' ');
+            span.append(document.createTextNode(data));
+            resultSpan.empty().append(span);
+        }).fail(function() {
+            resultSpan.html('<span class="text-danger"><i class="fa fa-times"></i> ' + ${json.dumps(_("Connection error")) | n} + '</span>');
+        }).always(function() {
+            btn.prop('disabled', false);
+        });
+    });
+
     // Test API key button
     $('#testAnthropicKey').click(function() {
         var btn = $(this);

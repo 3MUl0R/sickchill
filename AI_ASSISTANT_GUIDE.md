@@ -1,7 +1,7 @@
 # AI Assistant User Guide
 
 > **Feature Version:** 1.0
-> **Requires:** Anthropic API Key (BYOK - Bring Your Own Key)
+> **Requires:** One of — an Anthropic API key (BYOK - Bring Your Own Key), or a locally installed and logged-in [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) on the server (no API key needed)
 
 ---
 
@@ -30,7 +30,7 @@ The AI Assistant is an optional feature that uses Anthropic's Claude AI to help 
 - **Fallback Only**: AI is used only when normal rule-based logic fails, not on every search or scan
 - **Cost Controlled**: Built-in throttling limits AI usage per show, per file, per hour, and per day
 - **Safe Automation**: High confidence thresholds prevent AI from acting on uncertain decisions
-- **BYOK Model**: You provide your own Anthropic API key - SickChill never sees your key server-side
+- **Two provider options**: an Anthropic API key (BYOK - SickChill never sees your key server-side), or a locally installed, logged-in Claude Code CLI on the server (no API key needed)
 
 ### When Does AI Trigger?
 
@@ -46,7 +46,15 @@ The AI Assistant is an optional feature that uses Anthropic's Claude AI to help 
 
 ## Getting Started
 
-### Step 1: Get an Anthropic API Key
+You can provide access to Claude in one of two ways. Pick **one**:
+
+- **Option A — Anthropic API key (BYOK):** simplest if you don't run Claude Code on the server.
+- **Option B — Claude Code CLI (local login):** if the server host already has the
+  [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) installed and logged in to an
+  Anthropic subscription, SickChill can use it directly — **no API key required**, and calls are
+  covered by your subscription.
+
+### Option A — Step 1: Get an Anthropic API Key
 
 1. Go to [console.anthropic.com](https://console.anthropic.com/)
 2. Create an account or sign in
@@ -56,17 +64,34 @@ The AI Assistant is an optional feature that uses Anthropic's Claude AI to help 
 
 > **Note:** Keep your API key secure. Never share it publicly.
 
-### Step 2: Enable AI in SickChill
+### Option A — Step 2: Enable AI in SickChill
 
 1. Go to **Config** → **AI Assistant**
 2. Check **Enable AI Features**
-3. Paste your API key in the **Anthropic API Key** field
-4. Click **Test API Key** to verify it works
-5. Select your preferred model (Claude Sonnet 4 recommended)
-6. Enable the specific features you want:
+3. Set **AI Provider** to **Anthropic API key (BYOK)**
+4. Paste your API key in the **Anthropic API Key** field
+5. Click **Test API Key** to verify it works
+6. Select your preferred model (Claude Sonnet 4 recommended)
+7. Enable the specific features you want:
    - **Enable Search AI** - For search result selection fallback
    - **Enable File Matching AI** - For unidentified file matching
-7. Click **Save Changes**
+8. Click **Save Changes**
+
+### Option B — Use the Claude Code CLI
+
+1. On the **server** host, install the Claude Code CLI and sign in once with `claude login`
+   (verify with `claude auth status`).
+2. In SickChill, go to **Config** → **AI Assistant** and check **Enable AI Features**.
+3. Set **AI Provider** to **Claude Code CLI (local login)**.
+4. Leave **Claude CLI Path** blank to auto-detect `claude` on the server's PATH, or enter a full path.
+5. Choose a model alias (Sonnet recommended) and click **Detect / Test CLI** — it should report the
+   logged-in account and subscription.
+6. Enable the features you want and click **Save Changes**.
+
+> **Note:** The CLI provider runs the `claude` binary on the server as a stateless, one-shot call per
+> request, with tools and MCP disabled and a sanitized environment so it always uses the logged-in
+> session. Usage dollar figures shown under **Usage & Costs** are API-equivalent estimates only —
+> subscription calls incur no per-call charge.
 
 ### Step 3: Verify Setup
 
