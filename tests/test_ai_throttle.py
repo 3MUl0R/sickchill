@@ -3,9 +3,9 @@ Tests for AI throttle functionality.
 
 Tests:
     TestFileFingerprint - File fingerprinting for cooldowns
-    TestRequestHash - Request hashing for caching
     TestBudgetTracking - In-memory budget limit tracking
-    TestCooldownLogic - Cooldown calculation logic
+    TestReservationNamespacing - Context-namespaced reservations/cooldowns
+    TestCooldownLogic - Cooldown calculation logic (via reserve_*)
 """
 
 from __future__ import annotations
@@ -91,54 +91,6 @@ class TestFileFingerprint(unittest.TestCase):
         finally:
             os.unlink(small_path)
             os.unlink(large_path)
-
-
-class TestRequestHash(unittest.TestCase):
-    """Test request hashing for cache keys."""
-
-    def test_hash_basic(self):
-        """Test basic hash generation."""
-        hash_val = ThrottleManager.generate_request_hash("test prompt")
-
-        self.assertEqual(len(hash_val), 32)
-        self.assertTrue(all(c in "0123456789abcdef" for c in hash_val))
-
-    def test_hash_consistency(self):
-        """Test that same input produces same hash."""
-        prompt = "Analyze these search results for Breaking Bad S05E16"
-
-        h1 = ThrottleManager.generate_request_hash(prompt)
-        h2 = ThrottleManager.generate_request_hash(prompt)
-
-        self.assertEqual(h1, h2)
-
-    def test_hash_with_context(self):
-        """Test hash with context dict."""
-        prompt = "Analyze results"
-        context = {"show": "Breaking Bad", "season": 5}
-
-        h1 = ThrottleManager.generate_request_hash(prompt, context)
-        h2 = ThrottleManager.generate_request_hash(prompt, context)
-
-        self.assertEqual(h1, h2)
-
-    def test_hash_context_affects_hash(self):
-        """Test that different contexts produce different hashes."""
-        prompt = "Analyze results"
-
-        h1 = ThrottleManager.generate_request_hash(prompt, {"show": "Breaking Bad"})
-        h2 = ThrottleManager.generate_request_hash(prompt, {"show": "Better Call Saul"})
-
-        self.assertNotEqual(h1, h2)
-
-    def test_hash_without_context(self):
-        """Test hash with None context."""
-        prompt = "Test prompt"
-
-        h1 = ThrottleManager.generate_request_hash(prompt, None)
-        h2 = ThrottleManager.generate_request_hash(prompt)
-
-        self.assertEqual(h1, h2)
 
 
 class TestBudgetTracking(unittest.TestCase):
@@ -269,7 +221,13 @@ class TestReservationNamespacing(unittest.TestCase):
         # No prior attempts recorded -> the DB cooldown never blocks in these tests.
         self.mock_connection.select.return_value = []
 
+        # Isolate the per-show cooldown lookup so reserve_search_attempt does not reach the real
+        # show_preferences DB/singleton (its own db is not the mocked throttle.db).
+        self.cooldown_patcher = mock.patch.object(ThrottleManager, "_get_cooldown_days_for_show", return_value=7)
+        self.cooldown_patcher.start()
+
     def tearDown(self):
+        self.cooldown_patcher.stop()
         self.settings_patcher.stop()
         self.db_patcher.stop()
 
@@ -354,13 +312,19 @@ class TestCooldownLogic(unittest.TestCase):
         self.mock_db.DBConnection.return_value = self.mock_connection
         self.mock_connection.has_table.return_value = True
 
+        # Isolate the per-show cooldown lookup (7-day) so reserve_search_attempt does not reach
+        # the real show_preferences DB/singleton.
+        self.cooldown_patcher = mock.patch.object(ThrottleManager, "_get_cooldown_days_for_show", return_value=7)
+        self.cooldown_patcher.start()
+
     def tearDown(self):
         """Clean up patches."""
+        self.cooldown_patcher.stop()
         self.settings_patcher.stop()
         self.db_patcher.stop()
 
     def test_allow_when_never_attempted(self):
-        """Test that requests are allowed when never attempted before."""
+        """Test that reservations are allowed when never attempted before."""
         self.mock_connection.select.return_value = []
 
         manager = ThrottleManager()
@@ -369,10 +333,10 @@ class TestCooldownLogic(unittest.TestCase):
         mock_show.indexerid = 12345
         mock_show.name = "Test Show"
 
-        self.assertTrue(manager.allow_search_for_show(mock_show))
+        self.assertTrue(manager.reserve_search_attempt(mock_show))
 
     def test_block_when_recently_attempted(self):
-        """Test that requests are blocked when recently attempted."""
+        """Test that reservations are blocked when recently attempted."""
         # Return a recent timestamp (1 hour ago)
         recent_time = time.time() - 3600
         self.mock_connection.select.return_value = [{"last_attempt": recent_time}]
@@ -384,10 +348,10 @@ class TestCooldownLogic(unittest.TestCase):
         mock_show.name = "Test Show"
 
         # With 7-day cooldown, 1 hour ago should still be blocked
-        self.assertFalse(manager.allow_search_for_show(mock_show))
+        self.assertFalse(manager.reserve_search_attempt(mock_show))
 
     def test_allow_after_cooldown_expires(self):
-        """Test that requests are allowed after cooldown expires."""
+        """Test that reservations are allowed after cooldown expires."""
         # Return an old timestamp (8 days ago)
         old_time = time.time() - (8 * 24 * 60 * 60)
         self.mock_connection.select.return_value = [{"last_attempt": old_time}]
@@ -399,7 +363,7 @@ class TestCooldownLogic(unittest.TestCase):
         mock_show.name = "Test Show"
 
         # With 7-day cooldown, 8 days ago should be allowed
-        self.assertTrue(manager.allow_search_for_show(mock_show))
+        self.assertTrue(manager.reserve_search_attempt(mock_show))
 
     def test_file_cooldown_hours(self):
         """Test file-based cooldown uses hours not days."""
@@ -410,10 +374,10 @@ class TestCooldownLogic(unittest.TestCase):
         manager = ThrottleManager()
 
         # With 72-hour cooldown, 24 hours ago should still be blocked
-        self.assertFalse(manager.allow_postprocess_for_file("/test/file.mkv"))
+        self.assertFalse(manager.reserve_postprocess_attempt("/test/file.mkv"))
 
     def test_disabled_ai_blocks_all(self):
-        """Test that disabled AI blocks all requests."""
+        """Test that disabled AI blocks all reservations."""
         self.mock_settings.AI_ENABLED = False
 
         manager = ThrottleManager()
@@ -421,8 +385,8 @@ class TestCooldownLogic(unittest.TestCase):
         mock_show = mock.MagicMock()
         mock_show.indexerid = 12345
 
-        self.assertFalse(manager.allow_search_for_show(mock_show))
-        self.assertFalse(manager.allow_postprocess_for_file("/test/file.mkv"))
+        self.assertFalse(manager.reserve_search_attempt(mock_show))
+        self.assertFalse(manager.reserve_postprocess_attempt("/test/file.mkv"))
 
 
 if __name__ == "__main__":

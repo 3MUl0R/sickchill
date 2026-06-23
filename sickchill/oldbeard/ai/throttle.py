@@ -117,41 +117,6 @@ class ThrottleManager:
         # Ensure indexes regardless of whether the tables already existed.
         cache_db.action("CREATE INDEX IF NOT EXISTS idx_ai_cache_expires ON ai_cache (expires)")
 
-    def allow_search_for_show(self, show) -> bool:
-        """
-        Check if AI search is allowed for this show based on cooldown.
-
-        Args:
-            show: TVShow object
-
-        Returns:
-            True if AI search is allowed (cooldown expired or never attempted)
-        """
-        if not settings.AI_ENABLED or not settings.AI_SEARCH_ENABLED:
-            return False
-
-        if not self._check_budget():
-            logger.debug("AI search blocked: budget exceeded")
-            return False
-
-        # Get per-show cooldown if configured, otherwise use global setting
-        cooldown_days = self._get_cooldown_days_for_show(show)
-        cooldown_seconds = cooldown_days * 24 * 60 * 60
-
-        scope_key = str(show.indexerid)
-        last_attempt = self._get_last_attempt(self.CONTEXT_SEARCH, self.SCOPE_SHOW, scope_key)
-
-        if last_attempt is None:
-            return True
-
-        elapsed = time.time() - last_attempt
-        if elapsed < cooldown_seconds:
-            remaining_hours = (cooldown_seconds - elapsed) / 3600
-            logger.debug(f"AI search for show {show.name} blocked: cooldown ({remaining_hours:.1f}h remaining)")
-            return False
-
-        return True
-
     def reserve_search_attempt(self, show) -> bool:
         """
         Atomically check cooldown and reserve a search slot for this show.
@@ -242,40 +207,6 @@ class ThrottleManager:
             self._pending_reservations.pop(self._pending_key(self.CONTEXT_SEARCH, scope_key), None)
 
         logger.debug(f"AI search reservation released for {show.name}")
-
-    def allow_postprocess_for_file(self, file_path: str) -> bool:
-        """
-        Check if AI post-processing is allowed for this file based on cooldown.
-
-        Args:
-            file_path: Path to the file
-
-        Returns:
-            True if AI post-processing is allowed
-        """
-        if not settings.AI_ENABLED or not settings.AI_POSTPROCESS_MATCH_ENABLED:
-            return False
-
-        if not self._check_budget():
-            logger.debug("AI post-process blocked: budget exceeded")
-            return False
-
-        cooldown_hours = settings.AI_POSTPROCESS_MATCH_COOLDOWN_HOURS_PER_FILE
-        cooldown_seconds = cooldown_hours * 60 * 60
-
-        scope_key = self.get_file_fingerprint(file_path)
-        last_attempt = self._get_last_attempt(self.CONTEXT_POSTPROCESS, self.SCOPE_FILE, scope_key)
-
-        if last_attempt is None:
-            return True
-
-        elapsed = time.time() - last_attempt
-        if elapsed < cooldown_seconds:
-            remaining_hours = (cooldown_seconds - elapsed) / 3600
-            logger.debug(f"AI post-process for file blocked: cooldown ({remaining_hours:.1f}h remaining)")
-            return False
-
-        return True
 
     def reserve_postprocess_attempt(self, file_path: str, context: Optional[str] = None) -> bool:
         """
@@ -431,18 +362,9 @@ class ThrottleManager:
             [now, context, scope, scope_key],
         )
 
-    def record_search_attempt(self, show) -> None:
-        """Convenience method to record a search attempt for a show."""
-        self.record_attempt(self.CONTEXT_SEARCH, self.SCOPE_SHOW, str(show.indexerid))
-
     def record_search_success(self, show) -> None:
         """Convenience method to record a successful search for a show."""
         self.record_success(self.CONTEXT_SEARCH, self.SCOPE_SHOW, str(show.indexerid))
-
-    def record_postprocess_attempt(self, file_path: str) -> None:
-        """Convenience method to record a post-process attempt for a file."""
-        fingerprint = self.get_file_fingerprint(file_path)
-        self.record_attempt(self.CONTEXT_POSTPROCESS, self.SCOPE_FILE, fingerprint)
 
     def record_postprocess_success(self, file_path: str, context: Optional[str] = None) -> None:
         """Convenience method to record a successful post-process for a file.
@@ -668,23 +590,3 @@ class ThrottleManager:
             logger.info(f"Cleaned up {count} expired AI cache entries")
 
         return count
-
-    @staticmethod
-    def generate_request_hash(prompt: str, context: Optional[Dict[str, Any]] = None) -> str:
-        """
-        Generate a hash for a request to use as cache key.
-
-        Args:
-            prompt: The prompt text
-            context: Optional context dict
-
-        Returns:
-            SHA256 hash string (first 32 chars)
-        """
-        import json
-
-        data = prompt
-        if context:
-            data += json.dumps(context, sort_keys=True)
-
-        return hashlib.sha256(data.encode()).hexdigest()[:32]
