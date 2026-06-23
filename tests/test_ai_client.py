@@ -355,7 +355,7 @@ class TestRetryLogic(unittest.TestCase):
         self.assertFalse(client._is_transient_error(Exception("Rate limit exceeded")))
 
     @mock.patch("sickchill.oldbeard.ai.anthropic_client.AnthropicClient._make_request")
-    @mock.patch("sickchill.oldbeard.ai.anthropic_client.time.sleep")
+    @mock.patch("sickchill.oldbeard.ai.base_client.time.sleep")
     def test_retry_on_transient_error(self, mock_sleep, mock_make_request):
         """Test that transient errors trigger retry."""
         from sickchill.oldbeard.ai.anthropic_client import AIError
@@ -375,7 +375,7 @@ class TestRetryLogic(unittest.TestCase):
         self.assertEqual(mock_sleep.call_count, 2)  # Slept before retries 2 and 3
 
     @mock.patch("sickchill.oldbeard.ai.anthropic_client.AnthropicClient._make_request")
-    @mock.patch("sickchill.oldbeard.ai.anthropic_client.time.sleep")
+    @mock.patch("sickchill.oldbeard.ai.base_client.time.sleep")
     def test_no_retry_on_auth_error(self, mock_sleep, mock_make_request):
         """Test that auth errors do NOT trigger retry."""
         mock_make_request.side_effect = AIConfigurationError("Authentication failed")
@@ -390,7 +390,7 @@ class TestRetryLogic(unittest.TestCase):
         mock_sleep.assert_not_called()
 
     @mock.patch("sickchill.oldbeard.ai.anthropic_client.AnthropicClient._make_request")
-    @mock.patch("sickchill.oldbeard.ai.anthropic_client.time.sleep")
+    @mock.patch("sickchill.oldbeard.ai.base_client.time.sleep")
     def test_no_retry_on_rate_limit(self, mock_sleep, mock_make_request):
         """Test that rate limit errors do NOT trigger retry."""
         from sickchill.oldbeard.ai.anthropic_client import AIRateLimitError
@@ -407,7 +407,7 @@ class TestRetryLogic(unittest.TestCase):
         mock_sleep.assert_not_called()
 
     @mock.patch("sickchill.oldbeard.ai.anthropic_client.AnthropicClient._make_request")
-    @mock.patch("sickchill.oldbeard.ai.anthropic_client.time.sleep")
+    @mock.patch("sickchill.oldbeard.ai.base_client.time.sleep")
     def test_max_retries_exhausted(self, mock_sleep, mock_make_request):
         """Test that all retries are exhausted before giving up."""
         from sickchill.oldbeard.ai.anthropic_client import MAX_RETRIES, AIError

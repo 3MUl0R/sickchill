@@ -1,62 +1,48 @@
 """
 Anthropic Claude API client wrapper for SickChill AI features.
 
-Handles API communication, error handling, and response parsing.
+Handles API communication, error handling, and response parsing for the
+API-key (BYOK) provider. The provider-agnostic orchestration (caching, cost
+tracking, retries, JSON parsing) lives in ``base_client.BaseAIClient``.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import re
-import time
-from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+
+from sickchill.oldbeard.ai.base_client import (
+    BACKOFF_MULTIPLIER,
+    INITIAL_BACKOFF_SECONDS,
+    MAX_BACKOFF_SECONDS,
+    MAX_RETRIES,
+    AIConfigurationError,
+    AIError,
+    AIRateLimitError,
+    AIResponseError,
+    APIUsage,
+    BaseAIClient,
+)
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class APIUsage:
-    """Token usage from an API request."""
-
-    input_tokens: int
-    output_tokens: int
-    model: str
-
-
-# Retry configuration
-MAX_RETRIES = 3
-INITIAL_BACKOFF_SECONDS = 1.0
-MAX_BACKOFF_SECONDS = 10.0
-BACKOFF_MULTIPLIER = 2.0
-
-
-class AIError(Exception):
-    """Base exception for AI-related errors."""
-
-    pass
+# Re-exported for backwards compatibility: existing imports and tests reference
+# these names from this module (e.g. ``from ...anthropic_client import MAX_RETRIES``).
+__all__ = [
+    "AnthropicClient",
+    "APIUsage",
+    "AIError",
+    "AIConfigurationError",
+    "AIRateLimitError",
+    "AIResponseError",
+    "MAX_RETRIES",
+    "INITIAL_BACKOFF_SECONDS",
+    "MAX_BACKOFF_SECONDS",
+    "BACKOFF_MULTIPLIER",
+]
 
 
-class AIConfigurationError(AIError):
-    """Raised when AI is not properly configured."""
-
-    pass
-
-
-class AIRateLimitError(AIError):
-    """Raised when API rate limit is exceeded."""
-
-    pass
-
-
-class AIResponseError(AIError):
-    """Raised when API returns an unexpected response."""
-
-    pass
-
-
-class AnthropicClient:
+class AnthropicClient(BaseAIClient):
     """
     Wrapper for the Anthropic Claude API.
 
@@ -167,231 +153,6 @@ class AnthropicClient:
                 logger.error(f"API test failed: {error_type}: {error_msg}")
                 return False, f"Connection failed: {error_msg}"
 
-    def analyze(
-        self,
-        prompt: str,
-        context: Optional[Dict[str, Any]] = None,
-        max_tokens: int = DEFAULT_MAX_TOKENS,
-        system_prompt: Optional[str] = None,
-        track_cost: bool = True,
-        cost_context: Optional[str] = None,
-        cost_scope_key: Optional[str] = None,
-        use_cache: bool = True,
-    ) -> Dict[str, Any]:
-        """
-        Send an analysis request to Claude and parse the JSON response.
-
-        Includes retry logic with exponential backoff for transient network errors.
-
-        Args:
-            prompt: The main prompt text (with placeholders already filled)
-            context: Optional additional context (logged but not sent)
-            max_tokens: Maximum tokens in response
-            system_prompt: Optional system prompt for additional instructions
-            track_cost: Whether to record usage in cost tracker (default: True)
-            cost_context: Context for cost tracking ("search" or "postprocess")
-            cost_scope_key: Scope key for cost tracking (show ID or file fingerprint)
-            use_cache: Whether to check/store in response cache (default: True)
-
-        Returns:
-            Parsed JSON response as a dictionary
-
-        Raises:
-            AIConfigurationError: If client is not properly configured
-            AIRateLimitError: If rate limit is exceeded
-            AIResponseError: If response cannot be parsed
-            AIError: For other API errors
-        """
-        if not self.is_configured():
-            raise AIConfigurationError("AI client is not properly configured")
-
-        # Log the request (without sensitive data)
-        context_summary = f" (context: {list(context.keys())})" if context else ""
-        logger.debug(f"AI request: {len(prompt)} chars{context_summary}")
-
-        # Check cache first
-        request_hash = None
-        if use_cache:
-            cached_response = self._check_cache(prompt, context, system_prompt, max_tokens, cost_context, cost_scope_key)
-            if cached_response is not None:
-                logger.debug("Returning cached AI response")
-                return cached_response
-            # Generate hash for later caching
-            request_hash = self._generate_cache_hash(prompt, context, system_prompt, max_tokens)
-
-        last_error = None
-        backoff = INITIAL_BACKOFF_SECONDS
-
-        for attempt in range(MAX_RETRIES):
-            try:
-                response, usage = self._make_request(prompt, max_tokens, system_prompt)
-
-                # Track cost if requested
-                if track_cost and usage:
-                    self._record_cost(usage, cost_context, cost_scope_key)
-
-                # Cache the response
-                if use_cache and request_hash:
-                    self._store_cache(request_hash, response, cost_context, cost_scope_key)
-
-                return response
-
-            except AIConfigurationError:
-                # Don't retry auth errors
-                raise
-            except AIRateLimitError:
-                # Don't retry rate limit errors (let caller handle cooldown)
-                raise
-            except AIResponseError:
-                # Don't retry response parsing errors (response was received)
-                raise
-            except AIError as e:
-                # Retry transient errors (network issues, timeouts)
-                last_error = e
-                if attempt < MAX_RETRIES - 1:
-                    logger.warning(f"AI request failed (attempt {attempt + 1}/{MAX_RETRIES}), retrying in {backoff:.1f}s: {e}")
-                    time.sleep(backoff)
-                    backoff = min(backoff * BACKOFF_MULTIPLIER, MAX_BACKOFF_SECONDS)
-                else:
-                    logger.error(f"AI request failed after {MAX_RETRIES} attempts: {e}")
-
-        # All retries exhausted
-        raise last_error or AIError("Request failed after all retries")
-
-    def _record_cost(
-        self,
-        usage: APIUsage,
-        context: Optional[str],
-        scope_key: Optional[str],
-    ) -> None:
-        """
-        Record API usage in the cost tracker.
-
-        Args:
-            usage: The APIUsage from the request
-            context: The context ("search" or "postprocess")
-            scope_key: The scope key (show ID or file fingerprint)
-        """
-        try:
-            from sickchill.oldbeard.ai.cost_tracker import get_cost_tracker
-
-            tracker = get_cost_tracker()
-            tracker.record_usage(
-                model=usage.model,
-                context=context or "unknown",
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                scope_key=scope_key,
-            )
-        except Exception as e:
-            # Don't let cost tracking errors affect the main flow
-            logger.debug(f"Failed to record cost: {e}")
-
-    def _generate_cache_hash(
-        self,
-        prompt: str,
-        context: Optional[Dict[str, Any]],
-        system_prompt: Optional[str] = None,
-        max_tokens: int = DEFAULT_MAX_TOKENS,
-    ) -> str:
-        """
-        Generate a hash for caching the request.
-
-        Args:
-            prompt: The prompt text
-            context: Optional context dict
-            system_prompt: Optional system prompt
-            max_tokens: Maximum tokens in response
-
-        Returns:
-            Hash string for cache key
-        """
-        import hashlib
-
-        # Build cache key components including model, system_prompt, and max_tokens
-        # to ensure different configurations get different cache entries
-        cache_parts = [
-            prompt,
-            self.model,
-            str(max_tokens),
-        ]
-
-        if context:
-            cache_parts.append(json.dumps(context, sort_keys=True))
-
-        if system_prompt:
-            cache_parts.append(system_prompt)
-
-        cache_key = "|".join(cache_parts)
-        return hashlib.sha256(cache_key.encode()).hexdigest()[:32]
-
-    def _check_cache(
-        self,
-        prompt: str,
-        context: Optional[Dict[str, Any]],
-        system_prompt: Optional[str],
-        max_tokens: int,
-        cost_context: Optional[str],
-        scope_key: Optional[str],
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Check if a cached response exists for this request.
-
-        Args:
-            prompt: The prompt text
-            context: Optional context dict
-            system_prompt: Optional system prompt
-            max_tokens: Maximum tokens in response
-            cost_context: The context type
-            scope_key: The scope key
-
-        Returns:
-            Cached response dict or None
-        """
-        try:
-            from sickchill.oldbeard.ai import get_throttle
-
-            throttle = get_throttle()
-            request_hash = self._generate_cache_hash(prompt, context, system_prompt, max_tokens)
-            cached = throttle.get_cached_response(request_hash)
-            if cached:
-                logger.debug(f"Cache hit for {cost_context}/{scope_key}")
-                return cached
-        except Exception as e:
-            logger.debug(f"Cache check failed: {e}")
-        return None
-
-    def _store_cache(
-        self,
-        request_hash: str,
-        response: Dict[str, Any],
-        cost_context: Optional[str],
-        scope_key: Optional[str],
-    ) -> None:
-        """
-        Store a response in the cache.
-
-        Args:
-            request_hash: The hash for this request
-            response: The response to cache
-            cost_context: The context type
-            scope_key: The scope key
-        """
-        try:
-            from sickchill.oldbeard.ai import get_throttle
-
-            throttle = get_throttle()
-            throttle.cache_response(
-                request_hash=request_hash,
-                response=response,
-                context=cost_context or "unknown",
-                scope="show" if cost_context == "search" else "file",
-                scope_key=scope_key or "unknown",
-            )
-            logger.debug(f"Response cached for {cost_context}/{scope_key}")
-        except Exception as e:
-            logger.debug(f"Failed to cache response: {e}")
-
     def _make_request(
         self,
         prompt: str,
@@ -473,77 +234,3 @@ class AnthropicClient:
             else:
                 logger.error(f"AI request failed: {error_type}: {error_msg}")
                 raise AIError(f"API request failed: {error_msg}")
-
-    @staticmethod
-    def _is_transient_error(error: Exception) -> bool:
-        """
-        Check if an error is transient and should be retried.
-
-        Args:
-            error: The exception to check
-
-        Returns:
-            True if the error is likely transient (network issues, timeouts)
-        """
-        error_msg = str(error).lower()
-        transient_indicators = [
-            "timeout",
-            "timed out",
-            "connection",
-            "network",
-            "temporary",
-            "unavailable",
-            "502",
-            "503",
-            "504",
-            "overloaded",
-        ]
-        return any(indicator in error_msg for indicator in transient_indicators)
-
-    def _parse_json_response(self, response_text: str) -> Dict[str, Any]:
-        """
-        Extract and parse JSON from Claude's response.
-
-        Claude may include text before/after the JSON, so we need to find it.
-
-        Args:
-            response_text: Raw response text from Claude
-
-        Returns:
-            Parsed JSON as dictionary
-
-        Raises:
-            AIResponseError: If JSON cannot be found or parsed
-        """
-        # First, try to parse the entire response as JSON
-        try:
-            parsed = json.loads(response_text.strip())
-            if isinstance(parsed, dict):
-                return parsed
-            # Not a dict (e.g., array) - continue to other methods
-        except json.JSONDecodeError:
-            pass
-
-        # Try to find JSON in code blocks
-        code_block_pattern = r"```(?:json)?\s*\n?(.*?)\n?```"
-        matches = re.findall(code_block_pattern, response_text, re.DOTALL)
-        for match in matches:
-            try:
-                parsed = json.loads(match.strip())
-                if isinstance(parsed, dict):
-                    return parsed
-            except json.JSONDecodeError:
-                continue
-
-        # Try to find JSON object pattern
-        json_pattern = r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}"
-        matches = re.findall(json_pattern, response_text, re.DOTALL)
-        for match in matches:
-            try:
-                return json.loads(match)
-            except json.JSONDecodeError:
-                continue
-
-        # Log the problematic response for debugging
-        logger.warning(f"Could not parse JSON from response: {response_text[:500]}...")
-        raise AIResponseError("Could not parse JSON from AI response. The model may have returned an unexpected format.")
