@@ -25,6 +25,9 @@ server.key
 /tests/cache.db*
 /tests/failed.db
 /tests/data/
+/tests/*.db
+/tests/base.crt
+/tests/base.key
 
 #  Compiled source   #
 ######################
@@ -111,3 +114,6 @@ fvapp-sickchill.service
 
 poetry.lock
 .claude/
+
+# Codex review logs (local, not for VCS)
+.codex-reviews/
