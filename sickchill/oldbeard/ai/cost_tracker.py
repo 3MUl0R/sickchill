@@ -17,8 +17,10 @@ from sickchill.oldbeard import db
 logger = logging.getLogger(__name__)
 
 
-# Pricing per million tokens (as of 2025)
-# These are approximate and may change - users should verify with Anthropic
+# Pricing per million tokens. These are approximate and may change - verify against the
+# Anthropic pricing page (https://platform.claude.com/docs). Exact-id entries below are kept
+# so historical usage rows (which stored the full model id) keep pricing correctly; newer or
+# CLI-reported ids resolve via MODEL_FAMILY_PRICING (longest-prefix) in _lookup_pricing().
 MODEL_PRICING = {
     "claude-sonnet-4-20250514": {
         "input_per_million": 3.00,
@@ -30,9 +32,28 @@ MODEL_PRICING = {
         "output_per_million": 15.00,
     },
     "claude-haiku-3-5-20241022": {
-        "input_per_million": 0.25,
-        "output_per_million": 1.25,
+        "input_per_million": 0.80,
+        "output_per_million": 4.00,
     },
+}
+
+# Family pricing matched by longest prefix when an exact id is not in MODEL_PRICING. Keys are
+# ordered most-specific first only for readability; _lookup_pricing picks the longest match.
+MODEL_FAMILY_PRICING = {
+    # Opus 4.5+ are $5/$25; only Opus 4.0/4.1 are $15/$75 (caught by the shorter prefix).
+    "claude-opus-4-5": {"input_per_million": 5.00, "output_per_million": 25.00},
+    "claude-opus-4-6": {"input_per_million": 5.00, "output_per_million": 25.00},
+    "claude-opus-4-7": {"input_per_million": 5.00, "output_per_million": 25.00},
+    "claude-opus-4-8": {"input_per_million": 5.00, "output_per_million": 25.00},
+    "claude-opus-4": {"input_per_million": 15.00, "output_per_million": 75.00},
+    "claude-sonnet-4": {"input_per_million": 3.00, "output_per_million": 15.00},
+    "claude-haiku-4": {"input_per_million": 1.00, "output_per_million": 5.00},
+    "claude-haiku-3-5": {"input_per_million": 0.80, "output_per_million": 4.00},
+    "claude-haiku-3": {"input_per_million": 0.25, "output_per_million": 1.25},
+    # Fable/Mythos 5 list at $10/$50. Not exposed in the API model dropdown, but the CLI can be
+    # handed any model id, so price them explicitly rather than falling back to Sonnet.
+    "claude-fable": {"input_per_million": 10.00, "output_per_million": 50.00},
+    "claude-mythos": {"input_per_million": 10.00, "output_per_million": 50.00},
 }
 
 # Default pricing for unknown models
@@ -40,6 +61,24 @@ DEFAULT_PRICING = {
     "input_per_million": 3.00,
     "output_per_million": 15.00,
 }
+
+
+def _lookup_pricing(model: str) -> Dict[str, float]:
+    """Resolve per-million pricing for a model id.
+
+    Order: (1) exact match in MODEL_PRICING (preserves historical rows); (2) longest matching
+    prefix in MODEL_FAMILY_PRICING; (3) DEFAULT_PRICING. Longest-prefix ensures a specific
+    family (e.g. ``claude-opus-4-8``) wins over a shorter one (``claude-opus-4``).
+    """
+    if not model:
+        return DEFAULT_PRICING
+    exact = MODEL_PRICING.get(model)
+    if exact is not None:
+        return exact
+    matches = [prefix for prefix in MODEL_FAMILY_PRICING if model.startswith(prefix)]
+    if matches:
+        return MODEL_FAMILY_PRICING[max(matches, key=len)]
+    return DEFAULT_PRICING
 
 
 @dataclass
@@ -134,7 +173,7 @@ class CostTracker:
         timestamp = time.time()
 
         # Calculate estimated cost
-        pricing = MODEL_PRICING.get(model, DEFAULT_PRICING)
+        pricing = _lookup_pricing(model)
         input_cost = (input_tokens / 1_000_000) * pricing["input_per_million"]
         output_cost = (output_tokens / 1_000_000) * pricing["output_per_million"]
         estimated_cost = input_cost + output_cost

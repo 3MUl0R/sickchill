@@ -520,9 +520,10 @@
                             <div class="field-pair row">
                                 <div class="col-md-12">
                                     <p class="help-block">
-                                        <b>${_('Pricing Reference (approximate):')}</b><br/>
-                                        Claude Sonnet 4: $3/M input, $15/M output tokens<br/>
-                                        Claude 3.5 Haiku: $0.25/M input, $1.25/M output tokens
+                                        <b>${_('Pricing Reference (approximate, per million tokens):')}</b><br/>
+                                        Claude Sonnet 4.x: $3 input / $15 output<br/>
+                                        Claude Opus 4.5+: $5 input / $25 output<br/>
+                                        Claude Haiku 4.5: $1 input / $5 output
                                     </p>
                                     <p class="help-block">
                                         <b>${_('Note:')}</b> ${_('When using the Claude Code CLI provider with a logged-in subscription, these dollar figures are API-equivalent estimates for reference only — calls are covered by your subscription and incur no per-call charge.')}

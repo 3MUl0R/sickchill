@@ -62,14 +62,32 @@ class TestCostTracker:
         )
         assert abs(sonnet_record.estimated_cost_usd - 3.0) < 0.01
 
-        # Haiku pricing: $0.25/M input, $1.25/M output
+        # Haiku 3.5 pricing (corrected): $0.80/M input, $4.00/M output
         haiku_record = cost_tracker.record_usage(
             model="claude-haiku-3-5-20241022",
             context="search",
             input_tokens=1_000_000,
             output_tokens=0,
         )
-        assert abs(haiku_record.estimated_cost_usd - 0.25) < 0.01
+        assert abs(haiku_record.estimated_cost_usd - 0.80) < 0.01
+
+    def test_estimated_cost_family_prefix_lookup(self, cost_tracker, mock_db):
+        """Full/CLI-reported model ids resolve via longest-prefix family pricing."""
+
+        def cost(model):
+            return cost_tracker.record_usage(model=model, context="search", input_tokens=1_000_000, output_tokens=0).estimated_cost_usd
+
+        # Opus 4.8 -> $5/M (longest prefix wins over the $15/M claude-opus-4 entry)
+        assert abs(cost("claude-opus-4-8-20251101") - 5.00) < 0.01
+        # Opus 4.1 -> $15/M (only the shorter claude-opus-4 prefix matches)
+        assert abs(cost("claude-opus-4-1-20250805") - 15.00) < 0.01
+        # Haiku 4.5 -> $1/M
+        assert abs(cost("claude-haiku-4-5-20251001") - 1.00) < 0.01
+        # Fable/Mythos -> $10/M (CLI can pass these even though not in the API dropdown)
+        assert abs(cost("claude-fable-5") - 10.00) < 0.01
+        assert abs(cost("claude-mythos-5") - 10.00) < 0.01
+        # Truly unknown -> DEFAULT ($3/M)
+        assert abs(cost("some-other-model") - 3.00) < 0.01
 
     def test_get_usage_summary(self, cost_tracker, mock_db):
         """Test getting usage summary."""
