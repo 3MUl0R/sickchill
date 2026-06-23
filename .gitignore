@@ -110,3 +110,4 @@ config.xml
 fvapp-sickchill.service
 
 poetry.lock
+.claude/
