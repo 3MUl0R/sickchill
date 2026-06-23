@@ -86,7 +86,7 @@ class CostTracker:
             logger.info("Creating ai_usage table")
             cache_db.action(
                 """
-                CREATE TABLE ai_usage (
+                CREATE TABLE IF NOT EXISTS ai_usage (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp NUMERIC NOT NULL,
                     model TEXT NOT NULL,
@@ -98,8 +98,12 @@ class CostTracker:
                 )
                 """
             )
-            cache_db.action("CREATE INDEX IF NOT EXISTS idx_ai_usage_timestamp ON ai_usage (timestamp)")
-            cache_db.action("CREATE INDEX IF NOT EXISTS idx_ai_usage_context ON ai_usage (context)")
+
+        # Ensure indexes regardless of whether the table already existed. Aligns with the
+        # cache.py migration: queries filter by timestamp and scope_key (context is only
+        # grouped in Python, never used as an SQL predicate).
+        cache_db.action("CREATE INDEX IF NOT EXISTS idx_ai_usage_timestamp ON ai_usage (timestamp)")
+        cache_db.action("CREATE INDEX IF NOT EXISTS idx_ai_usage_scope ON ai_usage (scope_key)")
 
     def record_usage(
         self,

@@ -75,7 +75,7 @@ class ThrottleManager:
             logger.info("Creating ai_throttle table")
             cache_db.action(
                 """
-                CREATE TABLE ai_throttle (
+                CREATE TABLE IF NOT EXISTS ai_throttle (
                     context TEXT,
                     scope TEXT,
                     scope_key TEXT,
@@ -90,7 +90,7 @@ class ThrottleManager:
             logger.info("Creating ai_cache table")
             cache_db.action(
                 """
-                CREATE TABLE ai_cache (
+                CREATE TABLE IF NOT EXISTS ai_cache (
                     request_hash TEXT PRIMARY KEY,
                     response_json TEXT,
                     created NUMERIC,
@@ -101,7 +101,9 @@ class ThrottleManager:
                 )
                 """
             )
-            cache_db.action("CREATE INDEX IF NOT EXISTS idx_ai_cache_expires ON ai_cache (expires)")
+
+        # Ensure indexes regardless of whether the tables already existed.
+        cache_db.action("CREATE INDEX IF NOT EXISTS idx_ai_cache_expires ON ai_cache (expires)")
 
     def allow_search_for_show(self, show) -> bool:
         """

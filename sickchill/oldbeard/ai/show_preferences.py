@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
@@ -89,12 +90,19 @@ class ShowPreferencesManager:
             logger.info("Creating ai_show_preferences table")
             cache_db.action(
                 """
-                CREATE TABLE ai_show_preferences (
+                CREATE TABLE IF NOT EXISTS ai_show_preferences (
                     show_id INTEGER PRIMARY KEY,
-                    preferences_json TEXT NOT NULL
+                    preferences_json TEXT NOT NULL,
+                    updated_at NUMERIC NOT NULL DEFAULT 0
                 )
                 """
             )
+        elif not cache_db.has_column("ai_show_preferences", "updated_at"):
+            # Repair a legacy two-column table created by an older version of this module
+            # before updated_at existed. The cache.py migration performs the same repair,
+            # but the on-demand fallback must be self-sufficient when run without it.
+            logger.info("Adding updated_at column to legacy ai_show_preferences table")
+            cache_db.action("ALTER TABLE ai_show_preferences ADD COLUMN updated_at NUMERIC NOT NULL DEFAULT 0")
 
     def get_preferences(self, show_id: int) -> ShowAIPreferences:
         """
@@ -144,10 +152,10 @@ class ShowPreferencesManager:
 
         cache_db.action(
             """
-            INSERT OR REPLACE INTO ai_show_preferences (show_id, preferences_json)
-            VALUES (?, ?)
+            INSERT OR REPLACE INTO ai_show_preferences (show_id, preferences_json, updated_at)
+            VALUES (?, ?, ?)
             """,
-            [show_id, prefs_json],
+            [show_id, prefs_json, time.time()],
         )
 
         # Update cache

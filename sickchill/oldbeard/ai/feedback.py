@@ -85,7 +85,7 @@ class FeedbackManager:
             logger.info("Creating ai_decisions table")
             cache_db.action(
                 """
-                CREATE TABLE ai_decisions (
+                CREATE TABLE IF NOT EXISTS ai_decisions (
                     decision_id TEXT PRIMARY KEY,
                     decision_type TEXT NOT NULL,
                     timestamp NUMERIC NOT NULL,
@@ -98,14 +98,12 @@ class FeedbackManager:
                 )
                 """
             )
-            cache_db.action("CREATE INDEX IF NOT EXISTS idx_ai_decisions_timestamp ON ai_decisions (timestamp)")
-            cache_db.action("CREATE INDEX IF NOT EXISTS idx_ai_decisions_show ON ai_decisions (show_id)")
 
         if not cache_db.has_table("ai_feedback"):
             logger.info("Creating ai_feedback table")
             cache_db.action(
                 """
-                CREATE TABLE ai_feedback (
+                CREATE TABLE IF NOT EXISTS ai_feedback (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     decision_id TEXT NOT NULL,
                     feedback_type TEXT NOT NULL,
@@ -116,7 +114,11 @@ class FeedbackManager:
                 )
                 """
             )
-            cache_db.action("CREATE INDEX IF NOT EXISTS idx_ai_feedback_decision ON ai_feedback (decision_id)")
+
+        # Ensure indexes regardless of whether the tables already existed.
+        cache_db.action("CREATE INDEX IF NOT EXISTS idx_ai_decisions_timestamp ON ai_decisions (timestamp)")
+        cache_db.action("CREATE INDEX IF NOT EXISTS idx_ai_decisions_show ON ai_decisions (show_id)")
+        cache_db.action("CREATE INDEX IF NOT EXISTS idx_ai_feedback_decision ON ai_feedback (decision_id)")
 
     def record_decision(
         self,
