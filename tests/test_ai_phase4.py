@@ -1,7 +1,7 @@
 """
 Tests for AI Phase 4 features: Enhancement.
 
-Tests cost tracking, caching, per-show preferences, feedback loop, and batch processing.
+Tests cost tracking, caching, per-show preferences, and the feedback loop.
 """
 
 import time
@@ -382,124 +382,6 @@ class TestFeedback:
 
 
 # ============================================================================
-# Batch Processor Tests
-# ============================================================================
-
-
-class TestBatchProcessor:
-    """Tests for the batch processor."""
-
-    @pytest.fixture
-    def batch_processor(self):
-        """Create a BatchProcessor instance."""
-        from sickchill.oldbeard.ai.batch import BatchProcessor
-
-        return BatchProcessor(rate_limit_per_minute=60, max_concurrent=1)
-
-    def test_create_job(self, batch_processor):
-        """Test creating a batch job."""
-        items = [
-            {"type": "search", "show_id": 1},
-            {"type": "search", "show_id": 2},
-            {"type": "search", "show_id": 3},
-        ]
-
-        job_id = batch_processor.create_job(items)
-
-        assert job_id is not None
-        status = batch_processor.get_job_status(job_id)
-        assert status["status"] == "pending"
-        assert status["total_items"] == 3
-
-    def test_get_job_status(self, batch_processor):
-        """Test getting job status."""
-        items = [{"data": "test"}]
-        job_id = batch_processor.create_job(items)
-
-        status = batch_processor.get_job_status(job_id)
-
-        assert status is not None
-        assert status["job_id"] == job_id
-        assert status["status"] == "pending"
-        assert status["total_items"] == 1
-        assert status["progress"] == 0
-
-    def test_get_nonexistent_job(self, batch_processor):
-        """Test getting status of non-existent job."""
-        status = batch_processor.get_job_status("nonexistent")
-        assert status is None
-
-    def test_start_job(self, batch_processor):
-        """Test starting a batch job."""
-        items = [{"value": 1}]
-        job_id = batch_processor.create_job(items)
-
-        def processor(item):
-            return {"processed": item["value"] * 2}
-
-        result = batch_processor.start_job(job_id, processor)
-
-        assert result is True
-
-        # Wait for processing
-        time.sleep(0.2)
-
-        status = batch_processor.get_job_status(job_id)
-        assert status["status"] in ("running", "completed")
-
-    def test_job_results(self, batch_processor):
-        """Test getting job results."""
-        items = [{"value": 1}, {"value": 2}]
-        job_id = batch_processor.create_job(items)
-
-        def processor(item):
-            return {"result": item["value"] * 2}
-
-        batch_processor.start_job(job_id, processor)
-
-        # Wait for processing
-        time.sleep(0.3)
-
-        results = batch_processor.get_job_results(job_id)
-
-        assert results is not None
-        assert len(results) == 2
-
-    def test_cancel_job(self, batch_processor):
-        """Test cancelling a job."""
-        items = [{"value": i} for i in range(100)]  # Many items
-        job_id = batch_processor.create_job(items)
-
-        def slow_processor(item):
-            time.sleep(0.1)
-            return {"result": item["value"]}
-
-        batch_processor.start_job(job_id, slow_processor)
-        time.sleep(0.05)  # Let it start
-
-        result = batch_processor.cancel_job(job_id)
-
-        assert result is True
-
-    def test_cleanup_old_jobs(self, batch_processor):
-        """Test cleaning up old jobs."""
-        # Create a job
-        items = [{"value": 1}]
-        job_id = batch_processor.create_job(items)
-
-        # Manually mark as completed and old
-        with batch_processor._lock:
-            job = batch_processor._jobs[job_id]
-            job.status = batch_processor._jobs[job_id].status.__class__.COMPLETED
-            job.created_at = time.time() - (25 * 3600)  # 25 hours ago
-
-        removed = batch_processor.cleanup_old_jobs(max_age_hours=24)
-
-        assert removed == 1
-        assert batch_processor.get_job_status(job_id) is None
-
-
-# ============================================================================
 # Response Caching Tests
 # ============================================================================
 
@@ -611,7 +493,6 @@ class TestPhase4Integration:
         assert hasattr(ai, "get_cost_tracker")
         assert hasattr(ai, "get_preferences_manager")
         assert hasattr(ai, "get_feedback_manager")
-        assert hasattr(ai, "get_batch_processor")
 
     def test_cost_tracker_dataclasses(self):
         """Test cost tracker dataclasses."""
@@ -646,14 +527,6 @@ class TestPhase4Integration:
         assert DecisionType.FILE_MATCH.value == "file_match"
         assert FeedbackType.CORRECT.value == "correct"
         assert FeedbackType.INCORRECT.value == "incorrect"
-
-    def test_batch_status_enum(self):
-        """Test batch status enum."""
-        from sickchill.oldbeard.ai.batch import BatchStatus
-
-        assert BatchStatus.PENDING.value == "pending"
-        assert BatchStatus.COMPLETED.value == "completed"
-        assert BatchStatus.FAILED.value == "failed"
 
     def test_preferences_dataclass(self):
         """Test preferences dataclass."""

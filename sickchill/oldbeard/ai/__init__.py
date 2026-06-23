@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from sickchill.oldbeard.ai.base_client import BaseAIClient
-    from sickchill.oldbeard.ai.batch import BatchProcessor
     from sickchill.oldbeard.ai.cost_tracker import CostTracker
     from sickchill.oldbeard.ai.feedback import FeedbackManager
     from sickchill.oldbeard.ai.show_preferences import ShowPreferencesManager
@@ -30,7 +29,6 @@ __all__ = [
     "get_cost_tracker",
     "get_preferences_manager",
     "get_feedback_manager",
-    "get_batch_processor",
     "reset_client",
     "is_ai_available",
 ]
@@ -136,16 +134,6 @@ def get_feedback_manager() -> "FeedbackManager":
     from sickchill.oldbeard.ai.feedback import get_feedback_manager as _get_fm
 
     return _get_fm()
-
-
-def get_batch_processor() -> "BatchProcessor":
-    """
-    Get the singleton BatchProcessor instance.
-    Delegates to the module-level singleton in batch.py.
-    """
-    from sickchill.oldbeard.ai.batch import get_batch_processor as _get_bp
-
-    return _get_bp()
 
 
 def is_ai_available() -> bool:
