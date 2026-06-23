@@ -382,6 +382,7 @@
                                     <input type="checkbox" name="ai_postprocess_analyze_enabled" id="ai_postprocess_analyze_enabled"
                                            class="enabler" ${checked(settings.AI_POSTPROCESS_ANALYZE_ENABLED)}/>
                                     <label for="ai_postprocess_analyze_enabled">${_('use AI to analyze file quality and detect issues (optional)')}</label>
+                                    <p class="help-block">${_('Runs as a separate step from AI file matching, with its own per-file cooldown, so an AI-matched file can still be quality-analyzed in the same pass (both share the global call budget).')}</p>
                                 </div>
                             </div>
 

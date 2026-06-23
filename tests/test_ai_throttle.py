@@ -246,6 +246,92 @@ class TestBudgetTracking(unittest.TestCase):
         self.assertEqual(status["hourly_used"], 500)
 
 
+class TestReservationNamespacing(unittest.TestCase):
+    """Pending reservations are namespaced by context so matcher/analyzer and search/postprocess
+    do not collide, and the matcher and analyzer hold independent per-file cooldowns."""
+
+    def setUp(self):
+        self.settings_patcher = mock.patch("sickchill.oldbeard.ai.throttle.settings")
+        self.mock_settings = self.settings_patcher.start()
+        self.mock_settings.AI_ENABLED = True
+        self.mock_settings.AI_SEARCH_ENABLED = True
+        self.mock_settings.AI_POSTPROCESS_MATCH_ENABLED = True
+        self.mock_settings.AI_SEARCH_COOLDOWN_DAYS_PER_SHOW = 7
+        self.mock_settings.AI_POSTPROCESS_MATCH_COOLDOWN_HOURS_PER_FILE = 72
+        self.mock_settings.AI_MAX_CALLS_PER_HOUR = 100
+        self.mock_settings.AI_MAX_CALLS_PER_DAY = 1000
+
+        self.db_patcher = mock.patch("sickchill.oldbeard.ai.throttle.db")
+        self.mock_db = self.db_patcher.start()
+        self.mock_connection = mock.MagicMock()
+        self.mock_db.DBConnection.return_value = self.mock_connection
+        self.mock_connection.has_table.return_value = True
+        # No prior attempts recorded -> the DB cooldown never blocks in these tests.
+        self.mock_connection.select.return_value = []
+
+    def tearDown(self):
+        self.settings_patcher.stop()
+        self.db_patcher.stop()
+
+    def test_matcher_and_analyzer_reserve_same_file_independently(self):
+        """The analyzer can reserve a file even though the matcher already holds it (pending)."""
+        manager = ThrottleManager()
+        fp = "/path/to/file.mkv"
+
+        self.assertTrue(manager.reserve_postprocess_attempt(fp))  # matcher (default context)
+        # A second reservation in the SAME context is blocked as a concurrent request.
+        self.assertFalse(manager.reserve_postprocess_attempt(fp))
+        # ...but the analyzer context reserves the same file concurrently.
+        self.assertTrue(manager.reserve_postprocess_attempt(fp, context=manager.CONTEXT_POSTPROCESS_ANALYZE))
+
+    def test_matcher_and_analyzer_cooldown_independent(self):
+        """A recent matcher attempt (DB cooldown) must not block the analyzer's own cooldown."""
+
+        # Return a recent last_attempt ONLY for the matcher context; empty for everything else.
+        # If the analyzer wrongly looked up CONTEXT_POSTPROCESS it would see this and be blocked.
+        def _select(_query, params=None):
+            if params and params[0] == ThrottleManager.CONTEXT_POSTPROCESS:
+                return [{"last_attempt": time.time() - 60}]  # 60s ago, inside the 72h cooldown
+            return []
+
+        self.mock_connection.select.side_effect = _select
+        manager = ThrottleManager()
+        fp = "/path/to/file.mkv"
+
+        # Matcher is blocked by its own recent cooldown.
+        self.assertFalse(manager.reserve_postprocess_attempt(fp))
+        # Analyzer uses a different context -> its cooldown lookup returns empty -> allowed.
+        self.assertTrue(manager.reserve_postprocess_attempt(fp, context=manager.CONTEXT_POSTPROCESS_ANALYZE))
+
+    def test_search_and_postprocess_pending_keys_do_not_collide(self):
+        """Identical scope_key strings under different contexts must not collide in the map."""
+        self.mock_connection.select.return_value = []  # no cooldown anywhere
+        manager = ThrottleManager()
+        # Force the file fingerprint to equal the show's scope_key string so the ONLY thing
+        # separating the two reservations is the context namespace.
+        manager.get_file_fingerprint = mock.MagicMock(return_value="4242")
+        show = mock.MagicMock()
+        show.indexerid = 4242
+
+        self.assertTrue(manager.reserve_search_attempt(show))  # pending key "search:4242"
+        # With the old unnamespaced map this would collide with "4242" and return False.
+        self.assertTrue(manager.reserve_postprocess_attempt("/x/y.mkv"))  # "postprocess:4242"
+
+        # Releasing the search reservation must not drop the postprocess one.
+        manager.release_search_reservation(show)
+        self.assertFalse(manager.reserve_postprocess_attempt("/x/y.mkv"))  # still held
+
+    def test_commit_releases_only_its_own_context(self):
+        """Committing the analyzer reservation frees the analyzer pending slot for re-reservation."""
+        manager = ThrottleManager()
+        fp = "/a/b.mkv"
+
+        self.assertTrue(manager.reserve_postprocess_attempt(fp, context=manager.CONTEXT_POSTPROCESS_ANALYZE))
+        manager.commit_postprocess_attempt(fp, context=manager.CONTEXT_POSTPROCESS_ANALYZE)
+        # Pending slot released (DB cooldown mocked empty) -> can reserve again.
+        self.assertTrue(manager.reserve_postprocess_attempt(fp, context=manager.CONTEXT_POSTPROCESS_ANALYZE))
+
+
 class TestCooldownLogic(unittest.TestCase):
     """Test cooldown calculation logic."""
 

@@ -40,10 +40,22 @@ class ThrottleManager:
     # Context types
     CONTEXT_SEARCH = "search"
     CONTEXT_POSTPROCESS = "postprocess"
+    # AI file matching and AI quality analysis run on the same file but are distinct
+    # operations; giving the analyzer its own context means its per-file cooldown is
+    # independent of the matcher's (otherwise analysis is silently skipped right after an
+    # AI match). They still share the global hourly/daily call budget.
+    CONTEXT_POSTPROCESS_ANALYZE = "postprocess_analyze"
 
     # Scope types
     SCOPE_SHOW = "show"
     SCOPE_FILE = "file"
+
+    @staticmethod
+    def _pending_key(context: str, scope_key: str) -> str:
+        """Key for the in-memory reservation map, namespaced by context so the same
+        scope_key under different contexts (e.g. matcher vs analyzer, or search vs
+        postprocess) cannot collide."""
+        return f"{context}:{scope_key}"
 
     def __init__(self):
         """Initialize the throttle manager."""
@@ -154,18 +166,19 @@ class ThrottleManager:
             True if reservation successful, False if blocked by cooldown/budget/concurrent request
         """
         scope_key = str(show.indexerid)
+        pending_key = self._pending_key(self.CONTEXT_SEARCH, scope_key)
 
         with self._budget_lock:
             # Check if there's already a pending reservation for this show
-            if scope_key in self._pending_reservations:
+            if pending_key in self._pending_reservations:
                 # Check if reservation is stale (> 5 minutes old = likely crashed)
-                if time.time() - self._pending_reservations[scope_key] < 300:
+                if time.time() - self._pending_reservations[pending_key] < 300:
                     logger.debug(f"AI search for {show.name} blocked: concurrent request in progress")
                     return False
                 # Stale reservation, clean it up
-                del self._pending_reservations[scope_key]
+                del self._pending_reservations[pending_key]
 
-            # Check standard cooldown (uses allow_search_for_show logic but inline)
+            # Check standard cooldown (same logic as the read-only cooldown check, inline)
             if not settings.AI_ENABLED or not settings.AI_SEARCH_ENABLED:
                 return False
 
@@ -187,7 +200,7 @@ class ThrottleManager:
                     return False
 
             # All checks passed - create reservation
-            self._pending_reservations[scope_key] = time.time()
+            self._pending_reservations[pending_key] = time.time()
             logger.debug(f"AI search reservation created for {show.name}")
             return True
 
@@ -209,7 +222,7 @@ class ThrottleManager:
 
         # Release the reservation
         with self._budget_lock:
-            self._pending_reservations.pop(scope_key, None)
+            self._pending_reservations.pop(self._pending_key(self.CONTEXT_SEARCH, scope_key), None)
 
         logger.debug(f"AI search attempt committed for {show.name}")
 
@@ -226,7 +239,7 @@ class ThrottleManager:
         scope_key = str(show.indexerid)
 
         with self._budget_lock:
-            self._pending_reservations.pop(scope_key, None)
+            self._pending_reservations.pop(self._pending_key(self.CONTEXT_SEARCH, scope_key), None)
 
         logger.debug(f"AI search reservation released for {show.name}")
 
@@ -264,7 +277,7 @@ class ThrottleManager:
 
         return True
 
-    def reserve_postprocess_attempt(self, file_path: str) -> bool:
+    def reserve_postprocess_attempt(self, file_path: str, context: Optional[str] = None) -> bool:
         """
         Atomically check cooldown and reserve a post-process slot for this file.
 
@@ -273,21 +286,26 @@ class ThrottleManager:
 
         Args:
             file_path: Path to the file
+            context: Throttle context (CONTEXT_POSTPROCESS for matching, the default, or
+                CONTEXT_POSTPROCESS_ANALYZE for quality analysis). Matching and analysis use
+                independent per-file cooldowns but share the global budget.
 
         Returns:
             True if reservation successful, False if blocked by cooldown/budget/concurrent request
         """
+        context = context or self.CONTEXT_POSTPROCESS
         scope_key = self.get_file_fingerprint(file_path)
+        pending_key = self._pending_key(context, scope_key)
 
         with self._budget_lock:
-            # Check if there's already a pending reservation for this file
-            if scope_key in self._pending_reservations:
+            # Check if there's already a pending reservation for this file+context
+            if pending_key in self._pending_reservations:
                 # Check if reservation is stale (> 5 minutes old = likely crashed)
-                if time.time() - self._pending_reservations[scope_key] < 300:
+                if time.time() - self._pending_reservations[pending_key] < 300:
                     logger.debug("AI post-process for file blocked: concurrent request in progress")
                     return False
                 # Stale reservation, clean it up
-                del self._pending_reservations[scope_key]
+                del self._pending_reservations[pending_key]
 
             # Check standard cooldown
             if not settings.AI_ENABLED:
@@ -300,7 +318,7 @@ class ThrottleManager:
 
             cooldown_hours = settings.AI_POSTPROCESS_MATCH_COOLDOWN_HOURS_PER_FILE
             cooldown_seconds = cooldown_hours * 60 * 60
-            last_attempt = self._get_last_attempt(self.CONTEXT_POSTPROCESS, self.SCOPE_FILE, scope_key)
+            last_attempt = self._get_last_attempt(context, self.SCOPE_FILE, scope_key)
 
             if last_attempt is not None:
                 elapsed = time.time() - last_attempt
@@ -310,11 +328,11 @@ class ThrottleManager:
                     return False
 
             # All checks passed - create reservation
-            self._pending_reservations[scope_key] = time.time()
+            self._pending_reservations[pending_key] = time.time()
             logger.debug("AI post-process reservation created for file")
             return True
 
-    def commit_postprocess_attempt(self, file_path: str, count_budget: bool = True) -> None:
+    def commit_postprocess_attempt(self, file_path: str, count_budget: bool = True, context: Optional[str] = None) -> None:
         """
         Commit a reserved post-process attempt after a successful response.
 
@@ -324,19 +342,21 @@ class ThrottleManager:
             file_path: Path to the file
             count_budget: Pass False when the response came from the cache (no API call), so
                 the cooldown is recorded but the call budget is not consumed.
+            context: Throttle context (must match the one used to reserve).
         """
+        context = context or self.CONTEXT_POSTPROCESS
         scope_key = self.get_file_fingerprint(file_path)
 
         # Record the attempt in database
-        self.record_attempt(self.CONTEXT_POSTPROCESS, self.SCOPE_FILE, scope_key, count_budget=count_budget)
+        self.record_attempt(context, self.SCOPE_FILE, scope_key, count_budget=count_budget)
 
         # Release the reservation
         with self._budget_lock:
-            self._pending_reservations.pop(scope_key, None)
+            self._pending_reservations.pop(self._pending_key(context, scope_key), None)
 
         logger.debug("AI post-process attempt committed for file")
 
-    def release_postprocess_reservation(self, file_path: str) -> None:
+    def release_postprocess_reservation(self, file_path: str, context: Optional[str] = None) -> None:
         """
         Release a post-process reservation without recording an attempt.
 
@@ -345,11 +365,13 @@ class ThrottleManager:
 
         Args:
             file_path: Path to the file
+            context: Throttle context (must match the one used to reserve).
         """
+        context = context or self.CONTEXT_POSTPROCESS
         scope_key = self.get_file_fingerprint(file_path)
 
         with self._budget_lock:
-            self._pending_reservations.pop(scope_key, None)
+            self._pending_reservations.pop(self._pending_key(context, scope_key), None)
 
         logger.debug("AI post-process reservation released for file")
 
@@ -422,10 +444,14 @@ class ThrottleManager:
         fingerprint = self.get_file_fingerprint(file_path)
         self.record_attempt(self.CONTEXT_POSTPROCESS, self.SCOPE_FILE, fingerprint)
 
-    def record_postprocess_success(self, file_path: str) -> None:
-        """Convenience method to record a successful post-process for a file."""
+    def record_postprocess_success(self, file_path: str, context: Optional[str] = None) -> None:
+        """Convenience method to record a successful post-process for a file.
+
+        Pass ``context=CONTEXT_POSTPROCESS_ANALYZE`` from the analyzer so its success is
+        recorded under the same context it reserved/committed against.
+        """
         fingerprint = self.get_file_fingerprint(file_path)
-        self.record_success(self.CONTEXT_POSTPROCESS, self.SCOPE_FILE, fingerprint)
+        self.record_success(context or self.CONTEXT_POSTPROCESS, self.SCOPE_FILE, fingerprint)
 
     def _get_cooldown_days_for_show(self, show) -> int:
         """

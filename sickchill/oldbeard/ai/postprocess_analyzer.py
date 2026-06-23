@@ -186,10 +186,13 @@ def analyze_file(
         logger.debug("AI post-process analysis is disabled")
         return None
 
-    # Check throttle - use atomic reservation to prevent race conditions
-    # Analyzer uses the same throttle context as matcher since they share budget
+    # Check throttle - use atomic reservation to prevent race conditions. The analyzer uses a
+    # throttle context distinct from the matcher so its per-file cooldown is independent (an
+    # AI-matched file can still be quality-analyzed in the same pass); they share the global
+    # call budget.
     throttle = get_throttle()
-    if not throttle.reserve_postprocess_attempt(file_path):
+    analyze_context = throttle.CONTEXT_POSTPROCESS_ANALYZE
+    if not throttle.reserve_postprocess_attempt(file_path, context=analyze_context):
         logger.debug("AI post-process analysis blocked by cooldown or concurrent request")
         return None
 
@@ -230,7 +233,7 @@ def analyze_file(
         client = get_client()
         if not client:
             logger.warning("AI client not available")
-            throttle.release_postprocess_reservation(file_path)
+            throttle.release_postprocess_reservation(file_path, context=analyze_context)
             return None
 
         logger.info(f"AI analyzing file quality: {filename}")
@@ -248,7 +251,7 @@ def analyze_file(
 
         # Commit the attempt: a cache hit still records the cooldown but must not bill the
         # hourly/daily call budget (no API call was made).
-        throttle.commit_postprocess_attempt(file_path, count_budget=not was_cached)
+        throttle.commit_postprocess_attempt(file_path, count_budget=not was_cached, context=analyze_context)
 
         # Validate response
         is_valid, rejection_reason = _validate_analysis_result(response)
@@ -273,7 +276,7 @@ def analyze_file(
                 _notify_analysis_issues(filename, issues)
 
         # Record success
-        throttle.record_postprocess_success(file_path)
+        throttle.record_postprocess_success(file_path, context=analyze_context)
 
         result = {
             "quality_verified": quality_verified,
@@ -289,7 +292,7 @@ def analyze_file(
     except Exception as e:
         logger.error(f"AI file analysis failed: {e}")
         # Release reservation on error so cooldown isn't consumed
-        throttle.release_postprocess_reservation(file_path)
+        throttle.release_postprocess_reservation(file_path, context=analyze_context)
         return None
 
 
