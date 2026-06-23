@@ -38,6 +38,7 @@ def _get_ai_fallback_result(results, episode, is_failed_retry=False):
     try:
         if _ai_search_advisor is None:
             from sickchill.oldbeard.ai import search_advisor
+
             _ai_search_advisor = search_advisor
 
         if not _ai_search_advisor.should_use_ai_fallback(results, episode.show, None):

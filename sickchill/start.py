@@ -498,8 +498,12 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
 
         settings.AI_POSTPROCESS_MATCH_ENABLED = check_setting_bool(settings.CFG, "AI", "ai_postprocess_match_enabled")
         settings.AI_POSTPROCESS_MATCH_ONLY_ON_FAILURE = check_setting_bool(settings.CFG, "AI", "ai_postprocess_match_only_on_failure", True)
-        settings.AI_POSTPROCESS_MATCH_COOLDOWN_HOURS_PER_FILE = check_setting_int(settings.CFG, "AI", "ai_postprocess_match_cooldown_hours_per_file", 72, min_val=1, max_val=720)
-        settings.AI_POSTPROCESS_MATCH_MIN_CONFIDENCE = check_setting_float(settings.CFG, "AI", "ai_postprocess_match_min_confidence", 0.85, min_val=0.0, max_val=1.0)
+        settings.AI_POSTPROCESS_MATCH_COOLDOWN_HOURS_PER_FILE = check_setting_int(
+            settings.CFG, "AI", "ai_postprocess_match_cooldown_hours_per_file", 72, min_val=1, max_val=720
+        )
+        settings.AI_POSTPROCESS_MATCH_MIN_CONFIDENCE = check_setting_float(
+            settings.CFG, "AI", "ai_postprocess_match_min_confidence", 0.85, min_val=0.0, max_val=1.0
+        )
 
         settings.AI_POSTPROCESS_ANALYZE_ENABLED = check_setting_bool(settings.CFG, "AI", "ai_postprocess_analyze_enabled")
         settings.AI_POSTPROCESS_VERIFY_QUALITY = check_setting_bool(settings.CFG, "AI", "ai_postprocess_verify_quality", True)

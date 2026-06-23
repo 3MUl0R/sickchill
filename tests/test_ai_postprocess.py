@@ -76,7 +76,9 @@ class TestMatchFileFunction(unittest.TestCase):
         # Mock prompt template
         self.template_patcher = mock.patch("sickchill.oldbeard.ai.postprocess_matcher._load_prompt_template")
         self.mock_template = self.template_patcher.start()
-        self.mock_template.return_value = "Test prompt: {filename} {folder_name} {relative_path} {release_name} {file_size_mb} {duration} {candidate_shows_json}"
+        self.mock_template.return_value = (
+            "Test prompt: {filename} {folder_name} {relative_path} {release_name} {file_size_mb} {duration} {candidate_shows_json}"
+        )
 
     def tearDown(self):
         """Clean up patches."""
@@ -417,11 +419,7 @@ class TestGetCandidateShows(unittest.TestCase):
 
         mock_get_exceptions.return_value = {}
 
-        candidates = _get_candidate_shows(
-            "some_file.mkv",
-            "downloads",
-            release_name="Game.of.Thrones.S05E10"
-        )
+        candidates = _get_candidate_shows("some_file.mkv", "downloads", release_name="Game.of.Thrones.S05E10")
 
         # Game of Thrones should score higher due to release_name
         got_found = any(c["name"] == "Game of Thrones" for c in candidates)

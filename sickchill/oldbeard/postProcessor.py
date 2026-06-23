@@ -56,6 +56,7 @@ def _get_ai_match_result(file_path, filename, folder_name, release_name=None):
     try:
         if _ai_postprocess_matcher is None:
             from sickchill.oldbeard.ai import postprocess_matcher
+
             _ai_postprocess_matcher = postprocess_matcher
 
         if not _ai_postprocess_matcher.should_use_ai_match(None, None, []):
@@ -92,6 +93,7 @@ def _get_ai_analysis_result(file_path, episode, quality, release_group=None):
     try:
         if _ai_postprocess_analyzer is None:
             from sickchill.oldbeard.ai import postprocess_analyzer
+
             _ai_postprocess_analyzer = postprocess_analyzer
 
         return _ai_postprocess_analyzer.analyze_file(
@@ -122,6 +124,7 @@ def _should_block_processing(analysis_result):
     try:
         if _ai_postprocess_analyzer is None:
             from sickchill.oldbeard.ai import postprocess_analyzer
+
             _ai_postprocess_analyzer = postprocess_analyzer
 
         return _ai_postprocess_analyzer.should_block_processing(analysis_result)
@@ -861,11 +864,7 @@ class PostProcessor(object):
                         if ai_episodes:
                             episodes = ai_episodes
 
-                        self._log(
-                            f"AI matched file to {show.name} S{season}E{episodes} "
-                            f"(confidence: {ai_result.get('confidence', 0):.0%})",
-                            logger.INFO
-                        )
+                        self._log(f"AI matched file to {show.name} S{season}E{episodes} (confidence: {ai_result.get('confidence', 0):.0%})", logger.INFO)
                 except Exception as e:
                     self._log(f"Failed to load AI-matched show: {e}", logger.DEBUG)
 

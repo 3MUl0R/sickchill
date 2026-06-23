@@ -16,7 +16,7 @@ import json
 import logging
 import os
 from difflib import SequenceMatcher
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from sickchill import settings
 from sickchill.oldbeard import ui
@@ -63,20 +63,14 @@ def _notify_match_failure(
     try:
         safe_reason = _escape_html(reason)
         safe_filename = html.escape(os.path.basename(filename)[:50])
-        ui.notifications.message(
-            "AI Post-Process Match Failed",
-            f"Couldn't identify file <i>{safe_filename}</i>. "
-            f"Reason: {safe_reason}"
-        )
+        ui.notifications.message("AI Post-Process Match Failed", f"Couldn't identify file <i>{safe_filename}</i>. Reason: {safe_reason}")
     except Exception as e:
         logger.debug(f"Failed to send AI match notification: {e}")
 
 
 def _load_prompt_template() -> str:
     """Load the file matching prompt template."""
-    template_path = os.path.join(
-        os.path.dirname(__file__), "prompts", "file_match.txt"
-    )
+    template_path = os.path.join(os.path.dirname(__file__), "prompts", "file_match.txt")
     try:
         with open(template_path, "r", encoding="utf-8") as f:
             return f.read()
@@ -127,7 +121,7 @@ def _get_candidate_shows(filename: str, folder_name: str, release_name: Optional
     # Sort by preliminary score and only check aliases for top candidates
     # This optimizes the expensive scene_exceptions lookup
     preliminary_scores.sort(key=lambda x: x[1], reverse=True)
-    top_candidates = preliminary_scores[:limit * 2]  # Check more to account for alias boosts
+    top_candidates = preliminary_scores[: limit * 2]  # Check more to account for alias boosts
 
     for show, base_score in top_candidates:
         score = base_score
@@ -137,6 +131,7 @@ def _get_candidate_shows(filename: str, folder_name: str, release_name: Optional
         if score >= 0.3:
             try:
                 from sickchill.oldbeard import scene_exceptions
+
                 exceptions = scene_exceptions.get_all_scene_exceptions(show.indexerid)
                 if exceptions:
                     # exceptions is {season: [{"show_name": "...", "custom": True}, ...]}
@@ -152,13 +147,15 @@ def _get_candidate_shows(filename: str, folder_name: str, release_name: Optional
             except Exception:
                 pass
 
-        candidates.append({
-            "indexer_id": show.indexerid,
-            "indexer": show.indexer,
-            "name": show.name,
-            "aliases": alias_names[:5],  # Limit aliases for prompt
-            "score": score,
-        })
+        candidates.append(
+            {
+                "indexer_id": show.indexerid,
+                "indexer": show.indexer,
+                "name": show.name,
+                "aliases": alias_names[:5],  # Limit aliases for prompt
+                "score": score,
+            }
+        )
 
     # Sort by final score descending and return top candidates
     candidates.sort(key=lambda x: x["score"], reverse=True)
@@ -177,12 +174,14 @@ def _format_candidates_for_prompt(candidates: List[Dict[str, Any]]) -> str:
     """
     formatted = []
     for candidate in candidates:
-        formatted.append({
-            "indexer_id": candidate["indexer_id"],
-            "indexer": candidate["indexer"],
-            "name": candidate["name"],
-            "aliases": candidate.get("aliases", []),
-        })
+        formatted.append(
+            {
+                "indexer_id": candidate["indexer_id"],
+                "indexer": candidate["indexer"],
+                "name": candidate["name"],
+                "aliases": candidate.get("aliases", []),
+            }
+        )
     return json.dumps(formatted, indent=2)
 
 
@@ -209,7 +208,7 @@ def _get_file_info(file_path: str) -> Dict[str, Any]:
 
     # Try to get duration using pymediainfo if available
     try:
-        from sickchill.helper.media_info import video_screen_size
+        pass
         # We can't easily get duration from the current helper, so skip for now
         # This could be enhanced later
     except Exception:
@@ -373,17 +372,12 @@ def match_file(
         min_confidence = settings.AI_POSTPROCESS_MATCH_MIN_CONFIDENCE
         if confidence < min_confidence:
             reason = f"AI confidence too low ({confidence:.0%})"
-            logger.info(
-                f"AI match confidence {confidence:.2f} below threshold {min_confidence:.2f}: {reasoning}"
-            )
+            logger.info(f"AI match confidence {confidence:.2f} below threshold {min_confidence:.2f}: {reasoning}")
             _notify_match_failure(filename, reason)
             return None
 
         # Find the indexer for the matched show
-        matched_candidate = next(
-            (c for c in candidates if c["indexer_id"] == show_id),
-            None
-        )
+        matched_candidate = next((c for c in candidates if c["indexer_id"] == show_id), None)
 
         # Success - return match result
         result = {
@@ -395,11 +389,7 @@ def match_file(
             "reasoning": reasoning,
         }
 
-        logger.info(
-            f"AI matched file to show {show_id}: "
-            f"S{result['season']}E{result['episodes']} "
-            f"(confidence: {confidence:.2f})"
-        )
+        logger.info(f"AI matched file to show {show_id}: S{result['season']}E{result['episodes']} (confidence: {confidence:.2f})")
 
         # Record success
         throttle.record_postprocess_success(file_path)

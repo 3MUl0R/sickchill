@@ -24,6 +24,7 @@ class APIUsage:
     output_tokens: int
     model: str
 
+
 # Retry configuration
 MAX_RETRIES = 3
 INITIAL_BACKOFF_SECONDS = 1.0
@@ -211,9 +212,7 @@ class AnthropicClient:
         # Check cache first
         request_hash = None
         if use_cache:
-            cached_response = self._check_cache(
-                prompt, context, system_prompt, max_tokens, cost_context, cost_scope_key
-            )
+            cached_response = self._check_cache(prompt, context, system_prompt, max_tokens, cost_context, cost_scope_key)
             if cached_response is not None:
                 logger.debug("Returning cached AI response")
                 return cached_response
@@ -233,9 +232,7 @@ class AnthropicClient:
 
                 # Cache the response
                 if use_cache and request_hash:
-                    self._store_cache(
-                        request_hash, response, cost_context, cost_scope_key
-                    )
+                    self._store_cache(request_hash, response, cost_context, cost_scope_key)
 
                 return response
 
@@ -252,10 +249,7 @@ class AnthropicClient:
                 # Retry transient errors (network issues, timeouts)
                 last_error = e
                 if attempt < MAX_RETRIES - 1:
-                    logger.warning(
-                        f"AI request failed (attempt {attempt + 1}/{MAX_RETRIES}), "
-                        f"retrying in {backoff:.1f}s: {e}"
-                    )
+                    logger.warning(f"AI request failed (attempt {attempt + 1}/{MAX_RETRIES}), retrying in {backoff:.1f}s: {e}")
                     time.sleep(backoff)
                     backoff = min(backoff * BACKOFF_MULTIPLIER, MAX_BACKOFF_SECONDS)
                 else:
@@ -452,10 +446,7 @@ class AnthropicClient:
             # Extract usage info
             usage = None
             if hasattr(response, "usage"):
-                logger.debug(
-                    f"AI response: {response.usage.input_tokens} input, "
-                    f"{response.usage.output_tokens} output tokens"
-                )
+                logger.debug(f"AI response: {response.usage.input_tokens} input, {response.usage.output_tokens} output tokens")
                 usage = APIUsage(
                     input_tokens=response.usage.input_tokens,
                     output_tokens=response.usage.output_tokens,
@@ -555,7 +546,4 @@ class AnthropicClient:
 
         # Log the problematic response for debugging
         logger.warning(f"Could not parse JSON from response: {response_text[:500]}...")
-        raise AIResponseError(
-            "Could not parse JSON from AI response. "
-            "The model may have returned an unexpected format."
-        )
+        raise AIResponseError("Could not parse JSON from AI response. The model may have returned an unexpected format.")

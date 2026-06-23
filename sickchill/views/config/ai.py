@@ -105,9 +105,7 @@ class ConfigAI(Config):
             min_val=0.0,
             max_val=1.0,
         )
-        settings.AI_NOTIFY_ON_FALLBACK_FAILURE = config.checkbox_to_value(
-            self.get_body_argument("ai_notify_on_fallback_failure", default=None)
-        )
+        settings.AI_NOTIFY_ON_FALLBACK_FAILURE = config.checkbox_to_value(self.get_body_argument("ai_notify_on_fallback_failure", default=None))
 
         # Anthropic API settings - use unhide() to handle hidden_value placeholder
         settings.ANTHROPIC_API_KEY = filters.unhide(
@@ -117,12 +115,9 @@ class ConfigAI(Config):
         settings.ANTHROPIC_MODEL = self.get_body_argument("anthropic_model", default="claude-sonnet-4-20250514")
 
         # Reset client if API key, model, or timeout changed
-        if (
-            settings.ANTHROPIC_API_KEY != old_api_key
-            or settings.ANTHROPIC_MODEL != old_model
-            or settings.AI_REQUEST_TIMEOUT != old_timeout
-        ):
+        if settings.ANTHROPIC_API_KEY != old_api_key or settings.ANTHROPIC_MODEL != old_model or settings.AI_REQUEST_TIMEOUT != old_timeout:
             from sickchill.oldbeard.ai import reset_client
+
             reset_client()
 
         # Budget/throttle settings
@@ -132,30 +127,16 @@ class ConfigAI(Config):
 
         # AI Search settings
         settings.AI_SEARCH_ENABLED = config.checkbox_to_value(self.get_body_argument("ai_search_enabled", default=None))
-        settings.AI_SEARCH_ONLY_ON_FAILURE = config.checkbox_to_value(
-            self.get_body_argument("ai_search_only_on_failure", default=None)
-        )
-        settings.AI_SEARCH_COOLDOWN_DAYS_PER_SHOW = try_int(
-            self.get_body_argument("ai_search_cooldown_days_per_show", default=7), 7
-        )
+        settings.AI_SEARCH_ONLY_ON_FAILURE = config.checkbox_to_value(self.get_body_argument("ai_search_only_on_failure", default=None))
+        settings.AI_SEARCH_COOLDOWN_DAYS_PER_SHOW = try_int(self.get_body_argument("ai_search_cooldown_days_per_show", default=7), 7)
         settings.AI_SEARCH_MIN_RESULTS = try_int(self.get_body_argument("ai_search_min_results", default=1), 1)
-        settings.AI_SEARCH_FALLBACK_TO_RULES_ON_ERROR = config.checkbox_to_value(
-            self.get_body_argument("ai_search_fallback_to_rules_on_error", default=None)
-        )
-        settings.AI_SEARCH_ALLOW_RELAX_FILTERS = config.checkbox_to_value(
-            self.get_body_argument("ai_search_allow_relax_filters", default=None)
-        )
+        settings.AI_SEARCH_FALLBACK_TO_RULES_ON_ERROR = config.checkbox_to_value(self.get_body_argument("ai_search_fallback_to_rules_on_error", default=None))
+        settings.AI_SEARCH_ALLOW_RELAX_FILTERS = config.checkbox_to_value(self.get_body_argument("ai_search_allow_relax_filters", default=None))
 
         # AI Post-Processing Match settings
-        settings.AI_POSTPROCESS_MATCH_ENABLED = config.checkbox_to_value(
-            self.get_body_argument("ai_postprocess_match_enabled", default=None)
-        )
-        settings.AI_POSTPROCESS_MATCH_ONLY_ON_FAILURE = config.checkbox_to_value(
-            self.get_body_argument("ai_postprocess_match_only_on_failure", default=None)
-        )
-        settings.AI_POSTPROCESS_MATCH_COOLDOWN_HOURS_PER_FILE = try_int(
-            self.get_body_argument("ai_postprocess_match_cooldown_hours_per_file", default=72), 72
-        )
+        settings.AI_POSTPROCESS_MATCH_ENABLED = config.checkbox_to_value(self.get_body_argument("ai_postprocess_match_enabled", default=None))
+        settings.AI_POSTPROCESS_MATCH_ONLY_ON_FAILURE = config.checkbox_to_value(self.get_body_argument("ai_postprocess_match_only_on_failure", default=None))
+        settings.AI_POSTPROCESS_MATCH_COOLDOWN_HOURS_PER_FILE = try_int(self.get_body_argument("ai_postprocess_match_cooldown_hours_per_file", default=72), 72)
         settings.AI_POSTPROCESS_MATCH_MIN_CONFIDENCE = _try_float(
             self.get_body_argument("ai_postprocess_match_min_confidence", default="0.85"),
             default=0.85,
@@ -164,18 +145,10 @@ class ConfigAI(Config):
         )
 
         # AI Post-Processing Analysis settings
-        settings.AI_POSTPROCESS_ANALYZE_ENABLED = config.checkbox_to_value(
-            self.get_body_argument("ai_postprocess_analyze_enabled", default=None)
-        )
-        settings.AI_POSTPROCESS_VERIFY_QUALITY = config.checkbox_to_value(
-            self.get_body_argument("ai_postprocess_verify_quality", default=None)
-        )
-        settings.AI_POSTPROCESS_DETECT_ISSUES = config.checkbox_to_value(
-            self.get_body_argument("ai_postprocess_detect_issues", default=None)
-        )
-        settings.AI_POSTPROCESS_SUGGEST_METADATA = config.checkbox_to_value(
-            self.get_body_argument("ai_postprocess_suggest_metadata", default=None)
-        )
+        settings.AI_POSTPROCESS_ANALYZE_ENABLED = config.checkbox_to_value(self.get_body_argument("ai_postprocess_analyze_enabled", default=None))
+        settings.AI_POSTPROCESS_VERIFY_QUALITY = config.checkbox_to_value(self.get_body_argument("ai_postprocess_verify_quality", default=None))
+        settings.AI_POSTPROCESS_DETECT_ISSUES = config.checkbox_to_value(self.get_body_argument("ai_postprocess_detect_issues", default=None))
+        settings.AI_POSTPROCESS_SUGGEST_METADATA = config.checkbox_to_value(self.get_body_argument("ai_postprocess_suggest_metadata", default=None))
 
         # Save config
         sickchill.start.save_config()
@@ -223,18 +196,20 @@ class ConfigAI(Config):
         stats = self._get_usage_stats()
         if stats:
             # Convert dataclasses to dicts for JSON serialization
-            return json.dumps({
-                "daily": {
-                    "requests": stats["daily"].total_requests,
-                    "cost": f"${stats['daily'].total_estimated_cost_usd:.4f}",
-                },
-                "weekly": {
-                    "requests": stats["weekly"].total_requests,
-                    "cost": f"${stats['weekly'].total_estimated_cost_usd:.4f}",
-                },
-                "monthly": {
-                    "requests": stats["monthly"].total_requests,
-                    "cost": f"${stats['monthly'].total_estimated_cost_usd:.4f}",
-                },
-            })
+            return json.dumps(
+                {
+                    "daily": {
+                        "requests": stats["daily"].total_requests,
+                        "cost": f"${stats['daily'].total_estimated_cost_usd:.4f}",
+                    },
+                    "weekly": {
+                        "requests": stats["weekly"].total_requests,
+                        "cost": f"${stats['weekly'].total_estimated_cost_usd:.4f}",
+                    },
+                    "monthly": {
+                        "requests": stats["monthly"].total_requests,
+                        "cost": f"${stats['monthly'].total_estimated_cost_usd:.4f}",
+                    },
+                }
+            )
         return json.dumps({"error": "Unable to get usage stats"})

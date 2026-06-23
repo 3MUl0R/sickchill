@@ -133,9 +133,7 @@ class ThrottleManager:
         elapsed = time.time() - last_attempt
         if elapsed < cooldown_seconds:
             remaining_hours = (cooldown_seconds - elapsed) / 3600
-            logger.debug(
-                f"AI search for show {show.name} blocked: cooldown ({remaining_hours:.1f}h remaining)"
-            )
+            logger.debug(f"AI search for show {show.name} blocked: cooldown ({remaining_hours:.1f}h remaining)")
             return False
 
         return True
@@ -183,9 +181,7 @@ class ThrottleManager:
                 elapsed = time.time() - last_attempt
                 if elapsed < cooldown_seconds:
                     remaining_hours = (cooldown_seconds - elapsed) / 3600
-                    logger.debug(
-                        f"AI search for show {show.name} blocked: cooldown ({remaining_hours:.1f}h remaining)"
-                    )
+                    logger.debug(f"AI search for show {show.name} blocked: cooldown ({remaining_hours:.1f}h remaining)")
                     return False
 
             # All checks passed - create reservation
@@ -259,9 +255,7 @@ class ThrottleManager:
         elapsed = time.time() - last_attempt
         if elapsed < cooldown_seconds:
             remaining_hours = (cooldown_seconds - elapsed) / 3600
-            logger.debug(
-                f"AI post-process for file blocked: cooldown ({remaining_hours:.1f}h remaining)"
-            )
+            logger.debug(f"AI post-process for file blocked: cooldown ({remaining_hours:.1f}h remaining)")
             return False
 
         return True
@@ -286,7 +280,7 @@ class ThrottleManager:
             if scope_key in self._pending_reservations:
                 # Check if reservation is stale (> 5 minutes old = likely crashed)
                 if time.time() - self._pending_reservations[scope_key] < 300:
-                    logger.debug(f"AI post-process for file blocked: concurrent request in progress")
+                    logger.debug("AI post-process for file blocked: concurrent request in progress")
                     return False
                 # Stale reservation, clean it up
                 del self._pending_reservations[scope_key]
@@ -308,14 +302,12 @@ class ThrottleManager:
                 elapsed = time.time() - last_attempt
                 if elapsed < cooldown_seconds:
                     remaining_hours = (cooldown_seconds - elapsed) / 3600
-                    logger.debug(
-                        f"AI post-process for file blocked: cooldown ({remaining_hours:.1f}h remaining)"
-                    )
+                    logger.debug(f"AI post-process for file blocked: cooldown ({remaining_hours:.1f}h remaining)")
                     return False
 
             # All checks passed - create reservation
             self._pending_reservations[scope_key] = time.time()
-            logger.debug(f"AI post-process reservation created for file")
+            logger.debug("AI post-process reservation created for file")
             return True
 
     def commit_postprocess_attempt(self, file_path: str) -> None:
@@ -336,7 +328,7 @@ class ThrottleManager:
         with self._budget_lock:
             self._pending_reservations.pop(scope_key, None)
 
-        logger.debug(f"AI post-process attempt committed for file")
+        logger.debug("AI post-process attempt committed for file")
 
     def release_postprocess_reservation(self, file_path: str) -> None:
         """
@@ -353,7 +345,7 @@ class ThrottleManager:
         with self._budget_lock:
             self._pending_reservations.pop(scope_key, None)
 
-        logger.debug(f"AI post-process reservation released for file")
+        logger.debug("AI post-process reservation released for file")
 
     def record_attempt(self, context: str, scope: str, scope_key: str) -> None:
         """
@@ -558,9 +550,7 @@ class ThrottleManager:
             # Fallback to just the filename
             return hashlib.sha256(file_path.encode()).hexdigest()[:32]
 
-    def get_cached_response(
-        self, request_hash: str
-    ) -> Optional[Dict[str, Any]]:
+    def get_cached_response(self, request_hash: str) -> Optional[Dict[str, Any]]:
         """
         Get a cached AI response if it exists and hasn't expired.
 

@@ -106,9 +106,7 @@ class BatchProcessor:
         """
         import hashlib
 
-        job_id = hashlib.sha256(
-            f"{time.time()}:{len(items)}".encode()
-        ).hexdigest()[:12]
+        job_id = hashlib.sha256(f"{time.time()}:{len(items)}".encode()).hexdigest()[:12]
 
         batch_items = []
         for i, item_data in enumerate(items):
@@ -213,10 +211,7 @@ class BatchProcessor:
             job.status = BatchStatus.COMPLETED
             job.completed_at = time.time()
 
-        logger.info(
-            f"Batch job {job_id} completed: "
-            f"{job.successful_items}/{job.total_items} successful"
-        )
+        logger.info(f"Batch job {job_id} completed: {job.successful_items}/{job.total_items} successful")
 
     def _wait_for_rate_limit(self) -> None:
         """Wait if necessary to respect rate limits."""

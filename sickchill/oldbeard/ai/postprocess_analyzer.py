@@ -15,7 +15,7 @@ from __future__ import annotations
 import html
 import logging
 import os
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from sickchill import settings
 from sickchill.oldbeard import ui
@@ -55,19 +55,14 @@ def _notify_analysis_issues(
     try:
         safe_filename = html.escape(os.path.basename(filename)[:50])
         safe_issues = ", ".join(_escape_html(issue) for issue in issues[:3])
-        ui.notifications.message(
-            "AI File Analysis Issues",
-            f"Issues detected in <i>{safe_filename}</i>: {safe_issues}"
-        )
+        ui.notifications.message("AI File Analysis Issues", f"Issues detected in <i>{safe_filename}</i>: {safe_issues}")
     except Exception as e:
         logger.debug(f"Failed to send AI analysis notification: {e}")
 
 
 def _load_prompt_template() -> str:
     """Load the file analysis prompt template."""
-    template_path = os.path.join(
-        os.path.dirname(__file__), "prompts", "file_analysis.txt"
-    )
+    template_path = os.path.join(os.path.dirname(__file__), "prompts", "file_analysis.txt")
     try:
         with open(template_path, "r", encoding="utf-8") as f:
             return f.read()
@@ -195,7 +190,7 @@ def analyze_file(
     # Analyzer uses the same throttle context as matcher since they share budget
     throttle = get_throttle()
     if not throttle.reserve_postprocess_attempt(file_path):
-        logger.debug(f"AI post-process analysis blocked by cooldown or concurrent request")
+        logger.debug("AI post-process analysis blocked by cooldown or concurrent request")
         return None
 
     try:
@@ -267,10 +262,7 @@ def analyze_file(
         quality_assessment = response.get("quality_assessment", "")
         notes = response.get("notes", "")
 
-        logger.debug(
-            f"AI analysis: quality_verified={quality_verified}, "
-            f"issues={len(issues)}, proceed={proceed}, confidence={confidence}"
-        )
+        logger.debug(f"AI analysis: quality_verified={quality_verified}, issues={len(issues)}, proceed={proceed}, confidence={confidence}")
 
         # Log and notify about issues
         if issues:

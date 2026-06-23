@@ -38,12 +38,12 @@ class TestJSONParsing(unittest.TestCase):
 
     def test_parse_json_with_whitespace(self):
         """Test parsing JSON with leading/trailing whitespace."""
-        response = '''
+        response = """
         {
             "selected_index": 1,
             "confidence": 0.85
         }
-        '''
+        """
 
         result = self.client._parse_json_response(response)
 
@@ -52,7 +52,7 @@ class TestJSONParsing(unittest.TestCase):
 
     def test_parse_json_in_code_block(self):
         """Test parsing JSON wrapped in markdown code block."""
-        response = '''Here is my analysis:
+        response = """Here is my analysis:
 
 ```json
 {
@@ -62,7 +62,7 @@ class TestJSONParsing(unittest.TestCase):
 }
 ```
 
-This is my recommendation.'''
+This is my recommendation."""
 
         result = self.client._parse_json_response(response)
 
@@ -71,11 +71,11 @@ This is my recommendation.'''
 
     def test_parse_json_in_plain_code_block(self):
         """Test parsing JSON in code block without json language tag."""
-        response = '''Analysis complete:
+        response = """Analysis complete:
 
 ```
 {"selected_index": 3, "confidence": 0.88}
-```'''
+```"""
 
         result = self.client._parse_json_response(response)
 
@@ -84,11 +84,11 @@ This is my recommendation.'''
 
     def test_parse_json_with_surrounding_text(self):
         """Test parsing JSON embedded in prose."""
-        response = '''Based on my analysis, the best result is:
+        response = """Based on my analysis, the best result is:
 
 {"selected_index": 1, "confidence": 0.90, "reasoning": "Good seeders"}
 
-Let me know if you need more information.'''
+Let me know if you need more information."""
 
         result = self.client._parse_json_response(response)
 
@@ -96,13 +96,13 @@ Let me know if you need more information.'''
 
     def test_parse_nested_json(self):
         """Test parsing JSON with nested objects."""
-        response = '''{
+        response = """{
             "show_indexer_id": 12345,
             "season": 5,
             "episodes": [16],
             "metadata": {"source": "tvdb"},
             "confidence": 0.95
-        }'''
+        }"""
 
         result = self.client._parse_json_response(response)
 
@@ -140,20 +140,20 @@ Let me know if you need more information.'''
     def test_parse_json_array_not_object(self):
         """Test parsing JSON array (should work if valid JSON)."""
         # Our parser looks for objects specifically, so array alone won't match
-        response = '[1, 2, 3]'
+        response = "[1, 2, 3]"
 
         with self.assertRaises(AIResponseError):
             self.client._parse_json_response(response)
 
     def test_parse_prefers_first_valid_json(self):
         """Test that first valid JSON object is returned when multiple exist."""
-        response = '''
+        response = """
 {"first": true, "selected_index": 0}
 
 Some text
 
 {"second": true, "selected_index": 1}
-'''
+"""
 
         result = self.client._parse_json_response(response)
 
@@ -410,7 +410,7 @@ class TestRetryLogic(unittest.TestCase):
     @mock.patch("sickchill.oldbeard.ai.anthropic_client.time.sleep")
     def test_max_retries_exhausted(self, mock_sleep, mock_make_request):
         """Test that all retries are exhausted before giving up."""
-        from sickchill.oldbeard.ai.anthropic_client import AIError, MAX_RETRIES
+        from sickchill.oldbeard.ai.anthropic_client import MAX_RETRIES, AIError
 
         mock_make_request.side_effect = AIError("Transient error: timeout")
 

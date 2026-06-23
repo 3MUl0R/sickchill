@@ -4,12 +4,10 @@ Tests for AI Phase 4 features: Enhancement.
 Tests cost tracking, caching, per-show preferences, feedback loop, and batch processing.
 """
 
-import json
 import time
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 # ============================================================================
 # Cost Tracker Tests

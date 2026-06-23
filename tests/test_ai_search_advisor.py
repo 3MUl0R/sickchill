@@ -103,6 +103,7 @@ class TestResultFormatting(unittest.TestCase):
 
         # Should be valid JSON
         import json
+
         data = json.loads(formatted)
 
         self.assertEqual(len(data), 1)
@@ -122,6 +123,7 @@ class TestResultFormatting(unittest.TestCase):
         formatted = _format_results_for_prompt(results)
 
         import json
+
         data = json.loads(formatted)
 
         self.assertEqual(len(data), 3)
@@ -137,6 +139,7 @@ class TestResultFormatting(unittest.TestCase):
         formatted = _format_results_for_prompt([result])
 
         import json
+
         data = json.loads(formatted)
 
         self.assertEqual(data[0]["provider"], "Unknown")
@@ -148,6 +151,7 @@ class TestResultFormatting(unittest.TestCase):
         formatted = _format_results_for_prompt([result])
 
         import json
+
         data = json.loads(formatted)
 
         self.assertEqual(data[0]["size_mb"], 500)
@@ -159,6 +163,7 @@ class TestResultFormatting(unittest.TestCase):
         formatted = _format_results_for_prompt([result])
 
         import json
+
         data = json.loads(formatted)
 
         self.assertEqual(data[0]["size_mb"], -1)
@@ -428,7 +433,9 @@ class TestAnalyzeResults(unittest.TestCase):
         # Mock prompt template loading
         self.load_template_patcher = mock.patch("sickchill.oldbeard.ai.search_advisor._load_prompt_template")
         self.mock_load_template = self.load_template_patcher.start()
-        self.mock_load_template.return_value = "Test prompt: {show_name} {season} {episode} {quality} {preferred_words} {ignored_words} {results_json} {failed_releases}"
+        self.mock_load_template.return_value = (
+            "Test prompt: {show_name} {season} {episode} {quality} {preferred_words} {ignored_words} {results_json} {failed_releases}"
+        )
 
         # Mock failed releases
         self.failed_patcher = mock.patch("sickchill.oldbeard.ai.search_advisor._get_failed_releases_for_show")
@@ -664,9 +671,7 @@ class TestGetFailedReleases(unittest.TestCase):
         mock_db_class.return_value = mock_db
 
         # Return 15 matching releases
-        mock_db.select.return_value = [
-            {"release": f"Test_Show_S01E{i:02d}_720p"} for i in range(1, 16)
-        ]
+        mock_db.select.return_value = [{"release": f"Test_Show_S01E{i:02d}_720p"} for i in range(1, 16)]
 
         show = MockTVShow(name="Test Show")
 

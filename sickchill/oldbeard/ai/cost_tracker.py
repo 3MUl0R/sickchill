@@ -12,7 +12,6 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from sickchill import settings
 from sickchill.oldbeard import db
 
 logger = logging.getLogger(__name__)
@@ -151,10 +150,7 @@ class CostTracker:
             scope_key=scope_key,
         )
 
-        logger.debug(
-            f"AI usage recorded: {context} - {input_tokens} in, {output_tokens} out, "
-            f"${estimated_cost:.6f} estimated"
-        )
+        logger.debug(f"AI usage recorded: {context} - {input_tokens} in, {output_tokens} out, ${estimated_cost:.6f} estimated")
 
         return record
 
@@ -188,9 +184,7 @@ class CostTracker:
 
         # Get all records for the period
         if period == "all":
-            results = cache_db.select(
-                "SELECT * FROM ai_usage ORDER BY timestamp DESC"
-            )
+            results = cache_db.select("SELECT * FROM ai_usage ORDER BY timestamp DESC")
         else:
             results = cache_db.select(
                 "SELECT * FROM ai_usage WHERE timestamp > ? ORDER BY timestamp DESC",
@@ -370,16 +364,12 @@ class CostTracker:
         if summary.by_context:
             lines.append("  By context:")
             for ctx, data in summary.by_context.items():
-                lines.append(
-                    f"    {ctx}: {data['requests']} requests, ${data['estimated_cost_usd']:.4f}"
-                )
+                lines.append(f"    {ctx}: {data['requests']} requests, ${data['estimated_cost_usd']:.4f}")
 
         if summary.by_model:
             lines.append("  By model:")
             for model, data in summary.by_model.items():
-                lines.append(
-                    f"    {model}: {data['requests']} requests, ${data['estimated_cost_usd']:.4f}"
-                )
+                lines.append(f"    {model}: {data['requests']} requests, ${data['estimated_cost_usd']:.4f}")
 
         return "\n".join(lines)
 

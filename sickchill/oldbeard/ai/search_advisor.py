@@ -15,7 +15,7 @@ import html
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from sickchill import settings
 from sickchill.oldbeard import db, show_name_helpers, ui
@@ -70,8 +70,7 @@ def _notify_ai_fallback_failure(
         safe_reason = _escape_html(reason)
         ui.notifications.message(
             "AI Search Fallback Failed",
-            f"Couldn't find a suitable download for <i>{html.escape(show_name)}</i> {html.escape(episode_info)}. "
-            f"Reason: {safe_reason}"
+            f"Couldn't find a suitable download for <i>{html.escape(show_name)}</i> {html.escape(episode_info)}. Reason: {safe_reason}",
         )
     except Exception as e:
         logger.debug(f"Failed to send AI fallback notification: {e}")
@@ -79,9 +78,7 @@ def _notify_ai_fallback_failure(
 
 def _load_prompt_template() -> str:
     """Load the search selection prompt template."""
-    template_path = os.path.join(
-        os.path.dirname(__file__), "prompts", "search_selection.txt"
-    )
+    template_path = os.path.join(os.path.dirname(__file__), "prompts", "search_selection.txt")
     try:
         with open(template_path, "r", encoding="utf-8") as f:
             return f.read()
@@ -139,9 +136,7 @@ def _get_failed_releases_for_show(show: "TVShow") -> List[str]:
 
         # Get recent failed releases (last 50 to keep prompt manageable)
         # Note: failed.db stores normalized release names
-        results = failed_db.select(
-            'SELECT "release" FROM failed ORDER BY rowid DESC LIMIT 50'
-        )
+        results = failed_db.select('SELECT "release" FROM failed ORDER BY rowid DESC LIMIT 50')
 
         failed_names = []
         show_name_lower = show.name.lower().replace(" ", "").replace(".", "")
@@ -296,10 +291,7 @@ def analyze_search_results(
 
         # Get quality info
         allowed_qualities, preferred_qualities = Quality.splitQuality(show.quality)
-        quality_names = [
-            Quality.qualityStrings.get(q, "Unknown")
-            for q in (preferred_qualities or allowed_qualities)
-        ]
+        quality_names = [Quality.qualityStrings.get(q, "Unknown") for q in (preferred_qualities or allowed_qualities)]
         target_quality = ", ".join(quality_names) if quality_names else "Any"
 
         # Get preferred/ignored words
@@ -378,9 +370,7 @@ def analyze_search_results(
         confidence_threshold = prefs_manager.get_confidence_threshold(show)
         if confidence < confidence_threshold:
             reason = f"AI confidence too low ({confidence:.0%})"
-            logger.info(
-                f"AI confidence {confidence:.2f} below threshold {confidence_threshold:.2f}: {reasoning}"
-            )
+            logger.info(f"AI confidence {confidence:.2f} below threshold {confidence_threshold:.2f}: {reasoning}")
             _notify_ai_fallback_failure(show.name, episode_info, reason)
             return None
 
@@ -392,26 +382,15 @@ def analyze_search_results(
         # This is the key to making AI useful: it can select results that failed
         # soft filters (require/prefer words) but still pass hard filters (quality, etc.)
         relax_filters = settings.AI_SEARCH_ALLOW_RELAX_FILTERS
-        is_valid, rejection_reason = _validate_ai_selection(
-            selected_result, show, episode, relax_filters=relax_filters
-        )
+        is_valid, rejection_reason = _validate_ai_selection(selected_result, show, episode, relax_filters=relax_filters)
 
         if not is_valid:
-            logger.warning(
-                f"AI selected result #{selected_index} ({selected_result.name}) "
-                f"failed re-validation: {rejection_reason}"
-            )
-            _notify_ai_fallback_failure(
-                show.name, episode_info,
-                f"AI selection blocked by filters: {rejection_reason}"
-            )
+            logger.warning(f"AI selected result #{selected_index} ({selected_result.name}) failed re-validation: {rejection_reason}")
+            _notify_ai_fallback_failure(show.name, episode_info, f"AI selection blocked by filters: {rejection_reason}")
             return None
 
         # Success - return selected result
-        logger.info(
-            f"AI selected result #{selected_index}: {selected_result.name} "
-            f"(confidence: {confidence:.2f}, reason: {reasoning})"
-        )
+        logger.info(f"AI selected result #{selected_index}: {selected_result.name} (confidence: {confidence:.2f}, reason: {reasoning})")
 
         # Record success
         throttle.record_search_success(show)
@@ -469,9 +448,7 @@ def should_use_ai_fallback(
 
     # Check minimum results threshold
     if len(results) < settings.AI_SEARCH_MIN_RESULTS:
-        logger.debug(
-            f"Not enough results for AI analysis ({len(results)} < {settings.AI_SEARCH_MIN_RESULTS})"
-        )
+        logger.debug(f"Not enough results for AI analysis ({len(results)} < {settings.AI_SEARCH_MIN_RESULTS})")
         return False
 
     # Check per-show preferences (handles global settings too)
