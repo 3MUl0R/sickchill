@@ -485,7 +485,7 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
         settings.AI_PROVIDER = check_setting_str(settings.CFG, "AI", "ai_provider", "api")
 
         settings.ANTHROPIC_API_KEY = check_setting_str(settings.CFG, "AI", "anthropic_api_key", censor_log=True)
-        settings.ANTHROPIC_MODEL = check_setting_str(settings.CFG, "AI", "anthropic_model", "claude-sonnet-4-20250514")
+        settings.ANTHROPIC_MODEL = check_setting_str(settings.CFG, "AI", "anthropic_model", "claude-sonnet-4-6")
 
         settings.AI_CLI_PATH = check_setting_str(settings.CFG, "AI", "ai_cli_path", "")
         settings.AI_CLI_MODEL = check_setting_str(settings.CFG, "AI", "ai_cli_model", "sonnet")

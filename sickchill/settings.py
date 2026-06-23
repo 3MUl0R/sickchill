@@ -74,7 +74,7 @@ AI_PROVIDER = "api"
 
 # Anthropic API Settings
 ANTHROPIC_API_KEY = None
-ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
+ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 # Claude Code CLI provider settings (used when AI_PROVIDER == "cli")
 AI_CLI_PATH = ""  # optional explicit path to the `claude` binary ("" = auto-detect on PATH)

@@ -52,13 +52,14 @@ class AnthropicClient(BaseAIClient):
 
     PROVIDER = "api"
 
-    # Supported models with their display names
+    # Supported models with their display names (current Anthropic API model ids).
     SUPPORTED_MODELS = {
-        "claude-sonnet-4-20250514": "Claude Sonnet 4 (Recommended)",
-        "claude-haiku-3-5-20241022": "Claude 3.5 Haiku (Faster, cheaper)",
+        "claude-sonnet-4-6": "Claude Sonnet 4.6 (Recommended)",
+        "claude-opus-4-8": "Claude Opus 4.8 (Most capable)",
+        "claude-haiku-4-5-20251001": "Claude Haiku 4.5 (Faster, cheaper)",
     }
 
-    DEFAULT_MODEL = "claude-sonnet-4-20250514"
+    DEFAULT_MODEL = "claude-sonnet-4-6"
     DEFAULT_TIMEOUT = 30
     DEFAULT_MAX_TOKENS = 1024
 

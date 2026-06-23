@@ -199,19 +199,19 @@ class TestClientConfiguration(unittest.TestCase):
         """Test default model is set correctly."""
         client = AnthropicClient(api_key="test")
 
-        self.assertEqual(client.model, "claude-sonnet-4-20250514")
+        self.assertEqual(client.model, "claude-sonnet-4-6")
 
     def test_custom_model(self):
         """Test custom model is accepted."""
-        client = AnthropicClient(api_key="test", model="claude-haiku-3-5-20241022")
+        client = AnthropicClient(api_key="test", model="claude-haiku-4-5-20251001")
 
-        self.assertEqual(client.model, "claude-haiku-3-5-20241022")
+        self.assertEqual(client.model, "claude-haiku-4-5-20251001")
 
     def test_invalid_model_falls_back_to_default(self):
         """Test invalid model falls back to default."""
         client = AnthropicClient(api_key="test", model="invalid-model")
 
-        self.assertEqual(client.model, "claude-sonnet-4-20250514")
+        self.assertEqual(client.model, "claude-sonnet-4-6")
 
     def test_custom_timeout(self):
         """Test custom timeout is set."""
@@ -299,8 +299,9 @@ class TestSupportedModels(unittest.TestCase):
 
     def test_supported_models_exist(self):
         """Test that supported models dict is populated."""
-        self.assertIn("claude-sonnet-4-20250514", AnthropicClient.SUPPORTED_MODELS)
-        self.assertIn("claude-haiku-3-5-20241022", AnthropicClient.SUPPORTED_MODELS)
+        self.assertIn("claude-sonnet-4-6", AnthropicClient.SUPPORTED_MODELS)
+        self.assertIn("claude-opus-4-8", AnthropicClient.SUPPORTED_MODELS)
+        self.assertIn("claude-haiku-4-5-20251001", AnthropicClient.SUPPORTED_MODELS)
 
     def test_supported_models_have_descriptions(self):
         """Test that supported models have human-readable descriptions."""

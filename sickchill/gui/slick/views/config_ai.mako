@@ -91,12 +91,17 @@
                                             <label class="component-title">${_('AI Model')}</label>
                                         </div>
                                         <div class="col-lg-9 col-md-8 col-sm-7 col-xs-12 component-desc">
+                                            <%
+                                                # If the stored model id is no longer offered (e.g. upgraded from an older
+                                                # release), select the default so the dropdown is never left unselected.
+                                                selected_model = settings.ANTHROPIC_MODEL if settings.ANTHROPIC_MODEL in AnthropicClient.SUPPORTED_MODELS else AnthropicClient.DEFAULT_MODEL
+                                            %>
                                             <select id="anthropic_model" name="anthropic_model" class="form-control input-sm input250">
                                                 % for model_id, model_name in AnthropicClient.SUPPORTED_MODELS.items():
-                                                    <option value="${model_id}" ${selected(settings.ANTHROPIC_MODEL == model_id)}>${model_name}</option>
+                                                    <option value="${model_id}" ${selected(selected_model == model_id)}>${model_name}</option>
                                                 % endfor
                                             </select>
-                                            <label for="anthropic_model">${_('Claude Sonnet 4 is recommended for best accuracy')}</label>
+                                            <label for="anthropic_model">${_('Claude Sonnet 4.6 is recommended for best accuracy')}</label>
                                         </div>
                                     </div>
 

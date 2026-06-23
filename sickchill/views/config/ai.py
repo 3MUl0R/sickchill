@@ -122,7 +122,7 @@ class ConfigAI(Config):
         resolved_api_key = filters.unhide(old_api_key, posted_api_key)
         if resolved_api_key:
             settings.ANTHROPIC_API_KEY = resolved_api_key
-        settings.ANTHROPIC_MODEL = self.get_body_argument("anthropic_model", default="claude-sonnet-4-20250514")
+        settings.ANTHROPIC_MODEL = self.get_body_argument("anthropic_model", default="claude-sonnet-4-6")
 
         # Claude Code CLI provider settings. Only consume the path when the CLI panel is
         # present (provider == "cli"): absent -> keep stored path, empty -> clear to auto-detect.
