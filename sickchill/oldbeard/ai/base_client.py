@@ -323,7 +323,7 @@ class BaseAIClient:
                 request_hash=request_hash,
                 response=response,
                 context=cost_context or "unknown",
-                scope="show" if cost_context == "search" else "file",
+                scope="show" if cost_context in ("search", "search_match") else "file",
                 scope_key=scope_key or "unknown",
             )
             logger.debug(f"Response cached for {cost_context}/{scope_key}")

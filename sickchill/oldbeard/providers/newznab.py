@@ -17,6 +17,12 @@ class NewznabProvider(NZBProvider, tvcache.RSSTorrentMixin):
     Tested with: newznab, nzedb, spotweb, torznab
     """
 
+    # Safety bound on how many free-text (q=) requests an anime episode/season search may
+    # issue per mode. Anime is searched additively (structured season/ep + structured
+    # absolute + free-text variants from all_possible_show_names), and the alias list can be
+    # large; this caps provider request volume. Capped drops are logged (never silent).
+    ANIME_MAX_FREETEXT_VARIANTS = 8
+
     def __init__(self, name, url, key="0", categories="5030,5040", search_mode="episode", search_fallback=False, enable_daily=True, enable_backlog=False):
         super().__init__(name)
 
@@ -274,6 +280,13 @@ class NewznabProvider(NZBProvider, tvcache.RSSTorrentMixin):
                 return results
 
         for mode in search_strings:
+            # Anime (episode/season modes): search additively in multiple ways and pool the
+            # results, instead of the historical absolute-only query that frequently returned
+            # nothing. Air-by-date/sports anime and RSS keep the original path below.
+            if mode != "RSS" and self.show.is_anime and not (self.show.air_by_date or self.show.sports):
+                results += self._search_anime_mode(mode, search_strings[mode])
+                continue
+
             search_params = {
                 "t": ("search", "tvsearch")[bool(self.use_tv_search)],
                 "limit": 100,
@@ -345,6 +358,142 @@ class NewznabProvider(NZBProvider, tvcache.RSSTorrentMixin):
             results += items
 
         return results
+
+    def _anime_base_params(self):
+        """Base newznab request params shared by every anime query variant."""
+        params = {
+            "t": ("search", "tvsearch")[bool(self.use_tv_search)],
+            "limit": 100,
+            "offset": 0,
+            "cat": self.categories.strip(", ") or "5030,5040",
+            "maxage": settings.USENET_RETENTION,
+        }
+        if self.needs_auth and self.key:
+            params["apikey"] = self.key
+        return params
+
+    def _build_anime_variants(self, mode, search_strings):
+        """
+        Build the list of (label, params) request variants for an anime episode/season search.
+
+        Each variant is a freshly built params dict (no mutation/reuse across variants):
+          * structured season/episode  (tvdbid + season + ep)      [Episode mode]
+          * structured absolute number (tvdbid + ep=absolute)      [Episode mode]
+          * structured season pack     (tvdbid + season)           [Season mode]
+          * free-text                  (q=<string>)                [both modes, capped]
+
+        Structured (tvdbid) variants are only emitted when the provider advertises tvdbid
+        support and we are not talking to a torznab/jackett server (torznab ignores
+        tvdbid/season/ep, so a structured query would degrade to a useless tvdbid-only or
+        empty request). In the torznab case we rely on free-text, never a bare id query.
+        """
+        episode = self.current_episode_object
+        use_tvdbid = bool(self.use_tv_search) and "tvdbid" in str(self.cap_tv_search) and not self.torznab
+
+        variants = []
+
+        if use_tvdbid:
+            if mode == "Season":
+                # Season pack: tvdbid + season. Never tvdbid-only (which would match the
+                # whole show); when we cannot scope to a season we fall back to free-text.
+                if episode.scene_season is not None:
+                    season_params = self._anime_base_params()
+                    season_params["tvdbid"] = self.show.indexerid
+                    season_params["season"] = episode.scene_season
+                    variants.append(("structured-season", season_params))
+            else:
+                # The normal season/episode query a regular show issues (the high-impact fix).
+                sxe_params = self._anime_base_params()
+                sxe_params["tvdbid"] = self.show.indexerid
+                sxe_params["season"] = episode.scene_season
+                sxe_params["ep"] = episode.scene_episode
+                variants.append(("structured-season-ep", sxe_params))
+
+                # Absolute-number add-on (the historical anime query), kept as a booster.
+                if episode.absolute_number:
+                    abs_params = self._anime_base_params()
+                    abs_params["tvdbid"] = self.show.indexerid
+                    abs_params["ep"] = episode.absolute_number
+                    variants.append(("structured-absolute", abs_params))
+
+        # Free-text variants from get_episode/season_search_strings (deduped, capped).
+        free_text = sorted({s for s in search_strings if s})
+        capped = free_text[: self.ANIME_MAX_FREETEXT_VARIANTS]
+        if len(free_text) > len(capped):
+            logger.debug(
+                "[{0}] Capping anime free-text {1} queries from {2} to {3} (ANIME_MAX_FREETEXT_VARIANTS)".format(
+                    self.name, mode, len(free_text), len(capped)
+                )
+            )
+        for search_string in capped:
+            ft_params = self._anime_base_params()
+            ft_params["q"] = search_string
+            variants.append(("free-text", ft_params))
+
+        return variants
+
+    def _search_anime_mode(self, mode, search_strings):
+        """Issue the additive anime query variants for one mode and return deduped items."""
+        variants = self._build_anime_variants(mode, search_strings)
+        if not variants:
+            return []
+
+        items = []
+        logger.debug(_("Search Mode: {0}").format(mode))
+        for label, search_params in variants:
+            if "q" in search_params:
+                logger.debug(_("Search String: {search_string}").format(search_string=search_params["q"]))
+            else:
+                logger.debug("[{0}] Anime structured query: {1}".format(self.name, label))
+
+            time.sleep(cpu_presets[settings.CPU_PRESET])
+            data = self.get_url(self.request_url, params=search_params, returns="text")
+
+            if not data:
+                logger.debug(_("No data was returned from the provider"))
+                break
+
+            with BS4Parser(data, language="xml") as html:
+                if not self.check_auth_from_data(html):
+                    break
+
+                self.torznab = self.check_torznab(html)
+
+                for item in html("item"):
+                    try:
+                        result = self.parse_feed_item(item, self.url)
+                        if result:
+                            items.append(result)
+                    except Exception:
+                        continue
+
+        items = self._dedupe_results(items)
+        if self.torznab:
+            items.sort(key=lambda d: try_int(d.get("seeders", 0)), reverse=True)
+        return items
+
+    @staticmethod
+    def _dedupe_results(items):
+        """
+        Dedupe pooled results from multiple anime query variants.
+
+        Primary key is the normalized download link plus the item hash (present for
+        torznab/torrent results); falls back to title+size when no link is available.
+        """
+        seen = set()
+        deduped = []
+        for item in items:
+            link = (item.get("link") or "").strip().lower()
+            item_hash = (item.get("hash") or "").strip().lower()
+            if link or item_hash:
+                key = ("link", link, item_hash)
+            else:
+                key = ("title", (item.get("title") or "").strip().lower(), item.get("size", -1))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
 
     def _get_size(self, item):
         """

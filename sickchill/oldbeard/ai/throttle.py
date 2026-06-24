@@ -45,6 +45,11 @@ class ThrottleManager:
     # independent of the matcher's (otherwise analysis is silently skipped right after an
     # AI match). They still share the global hourly/daily call budget.
     CONTEXT_POSTPROCESS_ANALYZE = "postprocess_analyze"
+    # AI result->episode matching during search. It runs on the same show as the search
+    # advisor but is a distinct operation (mapping unmatched anime releases to episodes),
+    # so it gets its own context: an independent per-show cooldown that shares the global
+    # hourly/daily budget. Same rationale as the postprocess/postprocess_analyze split.
+    CONTEXT_SEARCH_MATCH = "search_match"
 
     # Scope types
     SCOPE_SHOW = "show"
@@ -117,7 +122,7 @@ class ThrottleManager:
         # Ensure indexes regardless of whether the tables already existed.
         cache_db.action("CREATE INDEX IF NOT EXISTS idx_ai_cache_expires ON ai_cache (expires)")
 
-    def reserve_search_attempt(self, show) -> bool:
+    def reserve_search_attempt(self, show, context: Optional[str] = None) -> bool:
         """
         Atomically check cooldown and reserve a search slot for this show.
 
@@ -126,12 +131,17 @@ class ThrottleManager:
 
         Args:
             show: TVShow object
+            context: Throttle context (CONTEXT_SEARCH for the result-selection advisor, the
+                default, or CONTEXT_SEARCH_MATCH for AI result->episode matching). The two
+                share the per-show search cooldown setting but keep independent cooldown
+                timestamps so one firing does not silently block the other.
 
         Returns:
             True if reservation successful, False if blocked by cooldown/budget/concurrent request
         """
+        context = context or self.CONTEXT_SEARCH
         scope_key = str(show.indexerid)
-        pending_key = self._pending_key(self.CONTEXT_SEARCH, scope_key)
+        pending_key = self._pending_key(context, scope_key)
 
         with self._budget_lock:
             # Check if there's already a pending reservation for this show
@@ -155,7 +165,7 @@ class ThrottleManager:
             # Get per-show cooldown if configured, otherwise use global setting
             cooldown_days = self._get_cooldown_days_for_show(show)
             cooldown_seconds = cooldown_days * 24 * 60 * 60
-            last_attempt = self._get_last_attempt(self.CONTEXT_SEARCH, self.SCOPE_SHOW, scope_key)
+            last_attempt = self._get_last_attempt(context, self.SCOPE_SHOW, scope_key)
 
             if last_attempt is not None:
                 elapsed = time.time() - last_attempt
@@ -166,10 +176,10 @@ class ThrottleManager:
 
             # All checks passed - create reservation
             self._pending_reservations[pending_key] = time.time()
-            logger.debug(f"AI search reservation created for {show.name}")
+            logger.debug(f"AI search reservation created for {show.name} ({context})")
             return True
 
-    def commit_search_attempt(self, show, count_budget: bool = True) -> None:
+    def commit_search_attempt(self, show, count_budget: bool = True, context: Optional[str] = None) -> None:
         """
         Commit a reserved search attempt after a successful response.
 
@@ -179,19 +189,21 @@ class ThrottleManager:
             show: TVShow object
             count_budget: Pass False when the response came from the cache (no API call), so
                 the cooldown is recorded but the call budget is not consumed.
+            context: Throttle context (must match the one used to reserve).
         """
+        context = context or self.CONTEXT_SEARCH
         scope_key = str(show.indexerid)
 
         # Record the attempt in database
-        self.record_attempt(self.CONTEXT_SEARCH, self.SCOPE_SHOW, scope_key, count_budget=count_budget)
+        self.record_attempt(context, self.SCOPE_SHOW, scope_key, count_budget=count_budget)
 
         # Release the reservation
         with self._budget_lock:
-            self._pending_reservations.pop(self._pending_key(self.CONTEXT_SEARCH, scope_key), None)
+            self._pending_reservations.pop(self._pending_key(context, scope_key), None)
 
-        logger.debug(f"AI search attempt committed for {show.name}")
+        logger.debug(f"AI search attempt committed for {show.name} ({context})")
 
-    def release_search_reservation(self, show) -> None:
+    def release_search_reservation(self, show, context: Optional[str] = None) -> None:
         """
         Release a search reservation without recording an attempt.
 
@@ -200,13 +212,15 @@ class ThrottleManager:
 
         Args:
             show: TVShow object
+            context: Throttle context (must match the one used to reserve).
         """
+        context = context or self.CONTEXT_SEARCH
         scope_key = str(show.indexerid)
 
         with self._budget_lock:
-            self._pending_reservations.pop(self._pending_key(self.CONTEXT_SEARCH, scope_key), None)
+            self._pending_reservations.pop(self._pending_key(context, scope_key), None)
 
-        logger.debug(f"AI search reservation released for {show.name}")
+        logger.debug(f"AI search reservation released for {show.name} ({context})")
 
     def reserve_postprocess_attempt(self, file_path: str, context: Optional[str] = None) -> bool:
         """
@@ -362,9 +376,13 @@ class ThrottleManager:
             [now, context, scope, scope_key],
         )
 
-    def record_search_success(self, show) -> None:
-        """Convenience method to record a successful search for a show."""
-        self.record_success(self.CONTEXT_SEARCH, self.SCOPE_SHOW, str(show.indexerid))
+    def record_search_success(self, show, context: Optional[str] = None) -> None:
+        """Convenience method to record a successful search for a show.
+
+        Pass ``context=CONTEXT_SEARCH_MATCH`` from the result->episode matcher so its success
+        is recorded under the same context it reserved/committed against.
+        """
+        self.record_success(context or self.CONTEXT_SEARCH, self.SCOPE_SHOW, str(show.indexerid))
 
     def record_postprocess_success(self, file_path: str, context: Optional[str] = None) -> None:
         """Convenience method to record a successful post-process for a file.

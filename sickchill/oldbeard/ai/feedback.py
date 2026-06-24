@@ -32,6 +32,7 @@ class DecisionType(Enum):
     """Types of AI decisions that can receive feedback."""
 
     SEARCH_SELECTION = "search_selection"
+    SEARCH_MATCH = "search_match"
     FILE_MATCH = "file_match"
     FILE_ANALYSIS = "file_analysis"
 

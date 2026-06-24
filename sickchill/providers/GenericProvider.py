@@ -12,7 +12,7 @@ from requests.structures import CaseInsensitiveDict
 from requests.utils import add_dict_to_cookiejar
 
 import sickchill.oldbeard
-from sickchill import logger
+from sickchill import logger, settings
 from sickchill.helper.common import sanitize_filename, valid_url
 from sickchill.oldbeard import filters
 from sickchill.oldbeard.common import MULTI_EP_RESULT, SEASON_RESULT, Quality
@@ -142,6 +142,13 @@ class GenericProvider(object):
         items_list = []
         searched_scene_season = None
 
+        # Anime releases the parser cannot map (unknown aliases, fansub naming, season-split
+        # titles) are collected here for the optional AI result->episode matcher instead of
+        # being silently dropped. Cheap guard only; search_matcher does the authoritative
+        # gating (per-show prefs, throttle, confidence). See sickchill/oldbeard/ai/search_matcher.py
+        collect_unmatched_anime = bool(show.is_anime) and settings.AI_ENABLED and settings.AI_SEARCH_ENABLED
+        unmatched_anime_items = []
+
         for episode in episodes:
             cache_result = self.cache.search_cache(episode, manual_search=manual_search, down_cur_quality=download_current_quality)
             if cache_result:
@@ -201,6 +208,10 @@ class GenericProvider(object):
                 parse_result = NameParser(parse_method=("normal", "anime")[show.is_anime]).parse(title)
             except (InvalidNameException, InvalidShowException) as error:
                 logger.debug(f"{error}")
+                # The alt-title / fansub case (e.g. Working!! posted as Wagnaria!!) fails here,
+                # before any episode matching. Keep it for the AI matcher rather than dropping.
+                if collect_unmatched_anime:
+                    unmatched_anime_items.append({"item": item, "title": title, "url": url, "size": size, "seeders": seeders, "leechers": leechers})
                 continue
 
             show_object = parse_result.show
@@ -237,6 +248,10 @@ class GenericProvider(object):
                     ):
                         logger.info(f"The result {title} doesn't seem to match an episode that we are currently trying to snatch, skipping it")
                         skip_release = True
+                        # Parsed fine but couldn't be mapped to a wanted episode; hand to the
+                        # AI matcher (handles absolute<->season/ep and alt numbering for anime).
+                        if collect_unmatched_anime:
+                            unmatched_anime_items.append({"item": item, "title": title, "url": url, "size": size, "seeders": seeders, "leechers": leechers})
 
                 if not skip_release:
                     actual_season = parse_result.season_number
@@ -325,7 +340,64 @@ class GenericProvider(object):
             cache_db = self.cache.get_db()
             cache_db.mass_upsert("results", cache_list)
 
+        # AI gap-filler: try to resolve anime releases the parser couldn't map. Runs before we
+        # return so the matched results flow through pick_best_result like any other result
+        # (G3: never skipped just because another result already exists for the episode).
+        if collect_unmatched_anime and unmatched_anime_items:
+            self._apply_ai_search_matches(show, episodes, unmatched_anime_items, results, manual_search, download_current_quality)
+
         return results
+
+    def _apply_ai_search_matches(self, show, episodes, unmatched_items, results, manual_search, download_current_quality):
+        """
+        Resolve dropped anime releases to wanted episodes via AI and add the confident ones.
+
+        AI only resolves *identity* (which episode a release is). Every mapping still passes
+        through ``want_episode`` here, and the results it adds are still subject to the normal
+        downstream ``pick_best_result``/quality/failed-history selection in oldbeard.search.
+        """
+        try:
+            from sickchill.oldbeard.ai.search_matcher import match_results
+        except Exception as error:
+            logger.debug(f"AI search matcher unavailable: {error}")
+            return
+
+        try:
+            matches = match_results(show, episodes, unmatched_items)
+        except Exception as error:
+            logger.debug(f"AI search matching error: {error}")
+            return
+
+        for match in matches:
+            item = match["item"]
+            title, url = self._get_title_and_url(item)
+            actual_season = match["season"]
+            episode_number = match["episode"]
+            quality = self.get_quality(item, anime=True)
+
+            if not show.want_episode(actual_season, episode_number, quality, manual_search, download_current_quality):
+                logger.debug(f"AI-matched result {title} (S{actual_season}E{episode_number}) is not wanted, skipping")
+                continue
+
+            episode_object = show.get_episode(actual_season, episode_number)
+            if not episode_object:
+                continue
+
+            result = self.get_result([episode_object], url)
+            result.show = show
+            result.name = title
+            result.quality = quality
+            result.release_group = ""
+            result.version = -1
+            result.content = None
+            result.size = self._get_size(item)
+
+            logger.info(f"AI search match added: {title} -> {show.name} S{actual_season}E{episode_number} (confidence {match.get('confidence', 0):.2f})")
+
+            if episode_number not in results:
+                results[episode_number] = [result]
+            else:
+                results[episode_number].append(result)
 
     def get_id(self, suffix=""):
         return GenericProvider.make_id(self.name) + str(suffix)
@@ -420,6 +492,7 @@ class GenericProvider(object):
         for show_name in all_possible_show_names(episode.show, season=episode.scene_season):
             episode_string = show_name + " "
             episode_string_fallback = None
+            episode_string_season = None
 
             if episode.show.air_by_date:
                 episode_string += str(episode.airdate).replace("-", " ")
@@ -428,7 +501,16 @@ class GenericProvider(object):
                 episode_string += ("|", " ")[len(self.proper_strings) > 1]
                 episode_string += episode.airdate.strftime("%b")
             elif episode.show.anime:
+                # Anime: search the absolute-number way (3-digit primary + 2-digit fallback)
+                # AND additionally the normal season/episode way. Many anime releases are
+                # posted as "Show SxxEyy" rather than by absolute number, so absolute-only
+                # search misses them. This is additive, not a replacement. scene_season/
+                # scene_episode fall back to the TVDB values when scene numbering is off.
                 episode_string_fallback = episode_string + "{0:02d}".format(int(episode.scene_absolute_number))
+                episode_string_season = episode_string + sickchill.oldbeard.config.naming_ep_type[2] % {
+                    "seasonnumber": episode.scene_season,
+                    "episodenumber": episode.scene_episode,
+                }
                 episode_string += "{0:03d}".format(int(episode.scene_absolute_number))
             else:
                 episode_string += sickchill.oldbeard.config.naming_ep_type[2] % {
@@ -440,10 +522,14 @@ class GenericProvider(object):
                 episode_string += " " + add_string
                 if episode_string_fallback:
                     episode_string_fallback += " " + add_string
+                if episode_string_season:
+                    episode_string_season += " " + add_string
 
             search_string["Episode"].add(episode_string.strip())
             if episode_string_fallback:
                 search_string["Episode"].add(episode_string_fallback.strip())
+            if episode_string_season:
+                search_string["Episode"].add(episode_string_season.strip())
 
         return [search_string]
 
