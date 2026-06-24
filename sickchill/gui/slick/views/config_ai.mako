@@ -465,22 +465,22 @@
                                             <tr>
                                                 <td>${_('Last 24 Hours')}</td>
                                                 <td>${usage_stats['daily'].total_requests}</td>
-                                                <td>${usage_stats['daily'].total_input_tokens:,}</td>
-                                                <td>${usage_stats['daily'].total_output_tokens:,}</td>
+                                                <td>${'{:,}'.format(usage_stats['daily'].total_input_tokens)}</td>
+                                                <td>${'{:,}'.format(usage_stats['daily'].total_output_tokens)}</td>
                                                 <td>$${'{:.4f}'.format(usage_stats['daily'].total_estimated_cost_usd)}</td>
                                             </tr>
                                             <tr>
                                                 <td>${_('Last 7 Days')}</td>
                                                 <td>${usage_stats['weekly'].total_requests}</td>
-                                                <td>${usage_stats['weekly'].total_input_tokens:,}</td>
-                                                <td>${usage_stats['weekly'].total_output_tokens:,}</td>
+                                                <td>${'{:,}'.format(usage_stats['weekly'].total_input_tokens)}</td>
+                                                <td>${'{:,}'.format(usage_stats['weekly'].total_output_tokens)}</td>
                                                 <td>$${'{:.4f}'.format(usage_stats['weekly'].total_estimated_cost_usd)}</td>
                                             </tr>
                                             <tr>
                                                 <td>${_('Last 30 Days')}</td>
                                                 <td>${usage_stats['monthly'].total_requests}</td>
-                                                <td>${usage_stats['monthly'].total_input_tokens:,}</td>
-                                                <td>${usage_stats['monthly'].total_output_tokens:,}</td>
+                                                <td>${'{:,}'.format(usage_stats['monthly'].total_input_tokens)}</td>
+                                                <td>${'{:,}'.format(usage_stats['monthly'].total_output_tokens)}</td>
                                                 <td>$${'{:.4f}'.format(usage_stats['monthly'].total_estimated_cost_usd)}</td>
                                             </tr>
                                         </tbody>
