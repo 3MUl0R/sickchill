@@ -204,6 +204,45 @@ class TestMatchResults(unittest.TestCase):
         self.assertEqual(search_matcher.match_results(self.show, [], self.items), [])
         self.assertEqual(search_matcher.match_results(self.show, self.episodes, []), [])
 
+    def test_scope_key_includes_provider_mode_season(self):
+        # Two seasons in the episode set -> season suffix lists both, sorted.
+        episodes = [_episode(1, 8, absolute=8), _episode(2, 3, absolute=27)]
+        items = [
+            {"item": {}, "title": "[Fansub] Working!! - 08", "url": "u0", "size": 1},
+            {"item": {}, "title": "[Fansub] Working!! S2 - 03", "url": "u1", "size": 1},
+        ]
+        self.client.analyze.return_value = ({"matches": []}, False)
+        search_matcher.match_results(self.show, episodes, items, provider_id="nzbgeek", search_mode="season")
+        _, reserve_kwargs = self.throttle.reserve_search_attempt.call_args
+        self.assertEqual(reserve_kwargs.get("scope_key"), "145211:nzbgeek:season:s1-2")
+
+    def test_manual_search_bypasses_cooldown(self):
+        self.client.analyze.return_value = ({"matches": []}, False)
+        search_matcher.match_results(self.show, self.episodes, self.items, manual_search=True)
+        _, reserve_kwargs = self.throttle.reserve_search_attempt.call_args
+        self.assertEqual(reserve_kwargs.get("cooldown_seconds"), 0)
+
+    def test_auto_search_uses_short_cooldown(self):
+        self.client.analyze.return_value = ({"matches": []}, False)
+        search_matcher.match_results(self.show, self.episodes, self.items)
+        _, reserve_kwargs = self.throttle.reserve_search_attempt.call_args
+        self.assertEqual(reserve_kwargs.get("cooldown_seconds"), search_matcher.SEARCH_MATCH_COOLDOWN_HOURS * 3600)
+
+    def test_failed_retry_does_not_bypass_cooldown(self):
+        # Failed retries arrive with manual_search=True but must stay throttled.
+        self.client.analyze.return_value = ({"matches": []}, False)
+        search_matcher.match_results(self.show, self.episodes, self.items, manual_search=True, is_failed_retry=True)
+        _, reserve_kwargs = self.throttle.reserve_search_attempt.call_args
+        self.assertEqual(reserve_kwargs.get("cooldown_seconds"), search_matcher.SEARCH_MATCH_COOLDOWN_HOURS * 3600)
+
+    def test_reserve_commit_success_share_one_scope_key(self):
+        search_matcher.match_results(self.show, self.episodes, self.items, provider_id="nzbgeek", search_mode="episode")
+        scope = "145211:nzbgeek:episode:s1"
+        self.assertEqual(self.throttle.reserve_search_attempt.call_args.kwargs.get("scope_key"), scope)
+        self.assertEqual(self.throttle.commit_search_attempt.call_args.kwargs.get("scope_key"), scope)
+        # this response has a match -> record_search_success must use the same keyed row
+        self.assertEqual(self.throttle.record_search_success.call_args.kwargs.get("scope_key"), scope)
+
 
 class TestThrottleContextIndependence(conftest.SickChillTestDBCase):
     def test_search_and_search_match_have_independent_cooldowns(self):
@@ -220,6 +259,89 @@ class TestThrottleContextIndependence(conftest.SickChillTestDBCase):
         throttle.record_attempt(ThrottleManager.CONTEXT_SEARCH_MATCH, ThrottleManager.SCOPE_SHOW, "888")
         # Should not raise and should target the search_match row.
         throttle.record_search_success(show, context=ThrottleManager.CONTEXT_SEARCH_MATCH)
+
+
+class TestDedupeUnmatched(unittest.TestCase):
+    def test_collapses_same_url_preserving_order(self):
+        items = [
+            {"title": "Working S1-02 [BD]", "url": "http://x/2", "size": 100},
+            {"title": "Working S1-03 [BD]", "url": "http://x/3", "size": 100},
+            {"title": "Working!! 02 (BD)", "url": "http://x/2", "size": 999},  # dup url, different title/size
+        ]
+        out = search_matcher._dedupe_unmatched(items)
+        self.assertEqual([i["url"] for i in out], ["http://x/2", "http://x/3"])
+
+    def test_keeps_distinct_urls(self):
+        items = [{"title": "a", "url": "u1"}, {"title": "b", "url": "u2"}]
+        self.assertEqual(len(search_matcher._dedupe_unmatched(items)), 2)
+
+    def test_url_less_falls_back_to_normalized_title_and_size(self):
+        items = [
+            {"title": "Working!! - 02", "url": "", "size": 100},
+            {"title": "working   02", "url": None, "size": 100},  # same normalized title + size -> dup
+            {"title": "Working!! - 02", "url": "", "size": 200},  # same title, different size -> kept
+        ]
+        out = search_matcher._dedupe_unmatched(items)
+        self.assertEqual(len(out), 2)
+
+    def test_normalize_title(self):
+        self.assertEqual(search_matcher._normalize_title("[Moozzi2] Working!! - 02"), "moozzi2working02")
+        self.assertEqual(search_matcher._normalize_title(None), "")
+
+
+class TestThrottleScopeOverride(conftest.SickChillTestDBCase):
+    def setUp(self):
+        super().setUp()
+        s_patcher = mock.patch("sickchill.oldbeard.ai.throttle.settings")
+        s = s_patcher.start()
+        self.addCleanup(s_patcher.stop)
+        s.AI_ENABLED = True
+        s.AI_SEARCH_ENABLED = True
+        s.AI_MAX_CALLS_PER_HOUR = 10000
+        s.AI_MAX_CALLS_PER_DAY = 10000
+        # Default-cooldown path reads per-show prefs; pin it so these tests don't depend on settings.
+        cd_patcher = mock.patch.object(ThrottleManager, "_get_cooldown_days_for_show", return_value=7)
+        cd_patcher.start()
+        self.addCleanup(cd_patcher.stop)
+        # cache.db is shared across the whole test session (teardown does not delete it), so clear
+        # the throttle table to isolate cooldown assertions from rows left by earlier AI tests.
+        ThrottleManager()  # ensures ai_throttle exists
+        from sickchill.oldbeard import db as _db
+
+        _db.DBConnection("cache.db").action("DELETE FROM ai_throttle")
+
+    def test_custom_scope_keys_isolate_cooldowns(self):
+        throttle = ThrottleManager()
+        show = types.SimpleNamespace(name="Show", indexerid=777)
+        ctx = ThrottleManager.CONTEXT_SEARCH_MATCH
+        long_cd = 6 * 3600
+        # Reserve+commit season 1 with a long cooldown.
+        self.assertTrue(throttle.reserve_search_attempt(show, context=ctx, scope_key="777:p:episode:s1", cooldown_seconds=long_cd))
+        throttle.commit_search_attempt(show, context=ctx, scope_key="777:p:episode:s1")
+        # Season 1 again is now blocked...
+        self.assertFalse(throttle.reserve_search_attempt(show, context=ctx, scope_key="777:p:episode:s1", cooldown_seconds=long_cd))
+        # ...but season 2 (different scope key) is free.
+        self.assertTrue(throttle.reserve_search_attempt(show, context=ctx, scope_key="777:p:episode:s2", cooldown_seconds=long_cd))
+
+    def test_zero_cooldown_never_blocks_but_records_attempt(self):
+        throttle = ThrottleManager()
+        show = types.SimpleNamespace(name="Show", indexerid=771)
+        ctx = ThrottleManager.CONTEXT_SEARCH_MATCH
+        key = "771:p:episode:s1"
+        self.assertTrue(throttle.reserve_search_attempt(show, context=ctx, scope_key=key, cooldown_seconds=0))
+        throttle.commit_search_attempt(show, context=ctx, scope_key=key)
+        # last_attempt was recorded...
+        self.assertIsNotNone(throttle._get_last_attempt(ctx, ThrottleManager.SCOPE_SHOW, key))
+        # ...yet a zero cooldown still allows an immediate re-reserve.
+        self.assertTrue(throttle.reserve_search_attempt(show, context=ctx, scope_key=key, cooldown_seconds=0))
+
+    def test_default_scope_and_cooldown_unchanged_for_advisor(self):
+        throttle = ThrottleManager()
+        show = types.SimpleNamespace(name="Show", indexerid=770)
+        # No overrides -> advisor path keys on the bare indexerid under CONTEXT_SEARCH.
+        self.assertTrue(throttle.reserve_search_attempt(show))
+        throttle.commit_search_attempt(show)
+        self.assertIsNotNone(throttle._get_last_attempt(ThrottleManager.CONTEXT_SEARCH, ThrottleManager.SCOPE_SHOW, "770"))
 
 
 class TestCacheScopeGate(unittest.TestCase):

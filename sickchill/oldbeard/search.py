@@ -503,7 +503,7 @@ def search_providers(show, episodes, manual=False, downCurQuality=False, is_fail
             )
 
             try:
-                search_results = curProvider.find_search_results(show, episodes, search_mode, manual, downCurQuality)
+                search_results = curProvider.find_search_results(show, episodes, search_mode, manual, downCurQuality, is_failed_retry)
             except AuthException as error:
                 logger.warning(f"Authentication error: {error}")
                 break

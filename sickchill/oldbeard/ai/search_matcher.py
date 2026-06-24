@@ -34,8 +34,43 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Cap on how many dropped releases we hand to the AI in one request (keeps the prompt and
-# response bounded; the throttle already bounds how often we call at all).
+# response bounded; the throttle already bounds how often we call at all). Applied AFTER de-duping,
+# since the same release URL is returned by many overlapping per-episode/free-text queries.
 MAX_RELEASES_PER_REQUEST = 40
+
+# Cooldown for an AUTOMATIC search-match attempt, scoped per (show, provider, search_mode, season).
+# Short by design: a backlog runs one season at a time, so the matcher must be free to fire for every
+# season (and re-attempt on later cycles to catch newly-available releases). This is independent of
+# the 7-day per-show advisor cooldown. User-triggered manual searches bypass it entirely.
+SEARCH_MATCH_COOLDOWN_HOURS = 6
+
+
+def _normalize_title(title: str) -> str:
+    """Lowercase and strip non-alphanumerics for a stable dedupe key."""
+    return "".join(ch for ch in (title or "").lower() if ch.isalnum())
+
+
+def _dedupe_unmatched(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """De-duplicate dropped releases, preserving order.
+
+    The same release is returned by many overlapping queries (per-episode structured + free-text),
+    so ``unmatched_items`` is heavily duplicated before we cap it. Key on the download ``url`` when
+    present (SickChill treats result URLs as unique), else fall back to ``(normalized_title, size)``
+    so distinct URL-less rows are not collapsed together.
+    """
+    seen = set()
+    unique: List[Dict[str, Any]] = []
+    for item in items:
+        url = item.get("url")
+        if url:
+            key = ("url", url)
+        else:
+            key = ("title", _normalize_title(item.get("title", "")), item.get("size", -1) or -1)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
 
 
 def _is_int(value: Any) -> bool:
@@ -110,6 +145,11 @@ def match_results(
     show: "TVShow",
     episodes: List["TVEpisode"],
     unmatched_items: List[Dict[str, Any]],
+    *,
+    provider_id: str = "",
+    search_mode: str = "episode",
+    manual_search: bool = False,
+    is_failed_retry: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Ask the AI to map dropped anime releases to wanted episodes of ``show``.
@@ -119,6 +159,14 @@ def match_results(
         episodes: The wanted episodes being searched for (the only valid targets).
         unmatched_items: Dropped releases. Each is a dict with at least ``title`` and the raw
             provider ``item``; ``url``/``size``/``seeders``/``leechers`` are passed through.
+        provider_id: Stable provider id; part of the cooldown scope so each provider attempts
+            independently within one search.
+        search_mode: "episode" or "season"; part of the cooldown scope so the season->episode
+            fallback within one search is not suppressed.
+        manual_search: True for a user-triggered manual search. Such searches bypass the cooldown
+            (the user asked for it now); the global budget and concurrency guard still apply.
+        is_failed_retry: True for a post-failed-download retry. These arrive with manual_search=True
+            but should stay throttled, so they do NOT bypass the cooldown.
 
     Returns:
         A list of confident mappings, each a copy of the input record augmented with
@@ -143,15 +191,32 @@ def match_results(
         logger.debug(f"AI search matching skipped for {show.name} (per-show preference)")
         return []
 
-    # Independent per-show cooldown from the selection advisor; shares the global budget.
+    # Cooldown scope: per (show, provider, search_mode, season-set). Finer than per-show so a single
+    # backlog pass can match every season (one BacklogQueueItem per season) and the provider/mode
+    # fallbacks within one search are not suppressed by the first attempt's cooldown.
+    seasons = "-".join(sorted({str(getattr(episode, "season", "")) for episode in episodes}))
+    scope_key = f"{show.indexerid}:{provider_id}:{search_mode}:s{seasons}"
+    # Manual (but NOT failed-retry) searches bypass the cooldown; everything else uses the short one.
+    bypass_cooldown = bool(manual_search) and not bool(is_failed_retry)
+    cooldown_seconds = 0 if bypass_cooldown else SEARCH_MATCH_COOLDOWN_HOURS * 60 * 60
+
     throttle = get_throttle()
-    if not throttle.reserve_search_attempt(show, context=ThrottleManager.CONTEXT_SEARCH_MATCH):
-        logger.debug(f"AI search matching for {show.name} blocked by cooldown or concurrent request")
+    if not throttle.reserve_search_attempt(
+        show, context=ThrottleManager.CONTEXT_SEARCH_MATCH, scope_key=scope_key, cooldown_seconds=cooldown_seconds
+    ):
+        logger.debug(f"AI search matching for {show.name} blocked by cooldown or concurrent request ({scope_key})")
         return []
 
-    items = unmatched_items[:MAX_RELEASES_PER_REQUEST]
-    if len(unmatched_items) > len(items):
-        logger.debug(f"AI search matching: capping {len(unmatched_items)} dropped releases to {len(items)} for {show.name}")
+    # De-dupe before capping so the cap holds diverse releases, not duplicates of a few episodes.
+    deduped = _dedupe_unmatched(unmatched_items)
+    items = deduped[:MAX_RELEASES_PER_REQUEST]
+    if len(unmatched_items) != len(deduped):
+        logger.debug(f"AI search matching: de-duped {len(unmatched_items)} dropped releases to {len(deduped)} for {show.name}")
+    if len(deduped) > len(items):
+        logger.warning(
+            f"AI search matching: {len(deduped)} unique releases exceeds cap {MAX_RELEASES_PER_REQUEST} for {show.name}; "
+            f"{len(deduped) - len(items)} not sent to AI this pass"
+        )
 
     try:
         template = _load_prompt_template()
@@ -166,7 +231,7 @@ def match_results(
         client = get_client()
         if not client:
             logger.warning("AI client not available")
-            throttle.release_search_reservation(show, context=ThrottleManager.CONTEXT_SEARCH_MATCH)
+            throttle.release_search_reservation(show, context=ThrottleManager.CONTEXT_SEARCH_MATCH, scope_key=scope_key)
             return []
 
         logger.info(f"AI matching {len(items)} unmatched anime releases for {show.name}")
@@ -180,11 +245,11 @@ def match_results(
         )
 
         # A cache hit still records the cooldown but must not bill the call budget.
-        throttle.commit_search_attempt(show, count_budget=not was_cached, context=ThrottleManager.CONTEXT_SEARCH_MATCH)
+        throttle.commit_search_attempt(show, count_budget=not was_cached, context=ThrottleManager.CONTEXT_SEARCH_MATCH, scope_key=scope_key)
 
         matches = _validate_matches(response, items, episodes, show)
         if matches:
-            throttle.record_search_success(show, context=ThrottleManager.CONTEXT_SEARCH_MATCH)
+            throttle.record_search_success(show, context=ThrottleManager.CONTEXT_SEARCH_MATCH, scope_key=scope_key)
             _record_feedback(show, items, matches, response)
 
         return matches
@@ -192,7 +257,7 @@ def match_results(
     except Exception as error:
         logger.error(f"AI search matching failed: {error}")
         # Release the reservation on error so a failed attempt doesn't consume the cooldown.
-        throttle.release_search_reservation(show, context=ThrottleManager.CONTEXT_SEARCH_MATCH)
+        throttle.release_search_reservation(show, context=ThrottleManager.CONTEXT_SEARCH_MATCH, scope_key=scope_key)
         return []
 
 

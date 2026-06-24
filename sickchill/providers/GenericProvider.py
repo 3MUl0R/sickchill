@@ -134,7 +134,7 @@ class GenericProvider(object):
 
         return [Proper(x["name"], x["url"], datetime.fromtimestamp(x["time"]), self.show) for x in results]
 
-    def find_search_results(self, show, episodes, search_mode, manual_search=False, download_current_quality=False):
+    def find_search_results(self, show, episodes, search_mode, manual_search=False, download_current_quality=False, is_failed_retry=False):
         self._check_auth()
         self.show = show
 
@@ -344,11 +344,13 @@ class GenericProvider(object):
         # return so the matched results flow through pick_best_result like any other result
         # (G3: never skipped just because another result already exists for the episode).
         if collect_unmatched_anime and unmatched_anime_items:
-            self._apply_ai_search_matches(show, episodes, unmatched_anime_items, results, manual_search, download_current_quality)
+            self._apply_ai_search_matches(
+                show, episodes, unmatched_anime_items, results, manual_search, download_current_quality, search_mode, is_failed_retry
+            )
 
         return results
 
-    def _apply_ai_search_matches(self, show, episodes, unmatched_items, results, manual_search, download_current_quality):
+    def _apply_ai_search_matches(self, show, episodes, unmatched_items, results, manual_search, download_current_quality, search_mode, is_failed_retry=False):
         """
         Resolve dropped anime releases to wanted episodes via AI and add the confident ones.
 
@@ -363,7 +365,15 @@ class GenericProvider(object):
             return
 
         try:
-            matches = match_results(show, episodes, unmatched_items)
+            matches = match_results(
+                show,
+                episodes,
+                unmatched_items,
+                provider_id=self.get_id(),
+                search_mode=search_mode,
+                manual_search=manual_search,
+                is_failed_retry=is_failed_retry,
+            )
         except Exception as error:
             logger.debug(f"AI search matching error: {error}")
             return
