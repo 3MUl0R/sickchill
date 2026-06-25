@@ -63,6 +63,7 @@ def get_client() -> Optional["BaseAIClient"]:
                 model=settings.AI_CLI_MODEL,
                 timeout=max(int(settings.AI_REQUEST_TIMEOUT), 60),
                 cli_path=settings.AI_CLI_PATH,
+                effort=settings.AI_CLI_EFFORT,
             )
         else:
             from sickchill.oldbeard.ai.anthropic_client import AnthropicClient

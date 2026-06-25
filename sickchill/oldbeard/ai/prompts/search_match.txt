@@ -34,15 +34,16 @@ Guidelines:
 - <0.5 : Do not include.
 
 ## Response Format
-Respond ONLY with valid JSON (no markdown, no explanation outside JSON):
+Respond ONLY with valid JSON (no markdown, no explanation outside JSON). Use exactly the fields
+shown below and nothing else — do not add a reasoning/explanation field unless it appears in the
+schema.
 {{
   "matches": [
     {{
       "index": <integer index from the Unmatched Release Titles list>,
       "season": <integer season number from a Wanted Episode>,
       "episode": <integer episode number from a Wanted Episode>,
-      "confidence": <0.0-1.0>,
-      "reasoning": "<brief explanation>"
+      "confidence": <0.0-1.0>{reasoning_field}
     }}
   ]
 }}

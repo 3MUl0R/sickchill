@@ -478,7 +478,7 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
 
         # AI Configuration
         settings.AI_ENABLED = check_setting_bool(settings.CFG, "AI", "ai_enabled")
-        settings.AI_REQUEST_TIMEOUT = check_setting_int(settings.CFG, "AI", "ai_request_timeout", 30, min_val=10, max_val=120)
+        settings.AI_REQUEST_TIMEOUT = check_setting_int(settings.CFG, "AI", "ai_request_timeout", 120, min_val=30, max_val=300, fallback_def=False)
         settings.AI_CONFIDENCE_THRESHOLD = check_setting_float(settings.CFG, "AI", "ai_confidence_threshold", 0.80, min_val=0.0, max_val=1.0)
         settings.AI_NOTIFY_ON_FALLBACK_FAILURE = check_setting_bool(settings.CFG, "AI", "ai_notify_on_fallback_failure", True)
 
@@ -489,6 +489,9 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
 
         settings.AI_CLI_PATH = check_setting_str(settings.CFG, "AI", "ai_cli_path", "")
         settings.AI_CLI_MODEL = check_setting_str(settings.CFG, "AI", "ai_cli_model", "sonnet")
+        settings.AI_CLI_EFFORT = check_setting_str(settings.CFG, "AI", "ai_cli_effort", "low")
+        if settings.AI_CLI_EFFORT not in ("low", "medium", "high", "xhigh", "max"):
+            settings.AI_CLI_EFFORT = "low"
 
         settings.AI_MAX_CALLS_PER_HOUR = check_setting_int(settings.CFG, "AI", "ai_max_calls_per_hour", 20, min_val=1, max_val=100)
         settings.AI_MAX_CALLS_PER_DAY = check_setting_int(settings.CFG, "AI", "ai_max_calls_per_day", 200, min_val=1, max_val=1000)
@@ -500,6 +503,7 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
         settings.AI_SEARCH_MIN_RESULTS = check_setting_int(settings.CFG, "AI", "ai_search_min_results", 1, min_val=1, max_val=10)
         settings.AI_SEARCH_FALLBACK_TO_RULES_ON_ERROR = check_setting_bool(settings.CFG, "AI", "ai_search_fallback_to_rules_on_error", True)
         settings.AI_SEARCH_ALLOW_RELAX_FILTERS = check_setting_bool(settings.CFG, "AI", "ai_search_allow_relax_filters")
+        settings.AI_SEARCH_MATCH_INCLUDE_REASONING = check_setting_bool(settings.CFG, "AI", "ai_search_match_include_reasoning")
 
         settings.AI_POSTPROCESS_MATCH_ENABLED = check_setting_bool(settings.CFG, "AI", "ai_postprocess_match_enabled")
         settings.AI_POSTPROCESS_MATCH_ONLY_ON_FAILURE = check_setting_bool(settings.CFG, "AI", "ai_postprocess_match_only_on_failure", True)
@@ -1439,6 +1443,7 @@ def save_config():
                 "anthropic_model": settings.ANTHROPIC_MODEL,
                 "ai_cli_path": settings.AI_CLI_PATH or "",
                 "ai_cli_model": settings.AI_CLI_MODEL,
+                "ai_cli_effort": settings.AI_CLI_EFFORT,
                 "ai_max_calls_per_hour": int(settings.AI_MAX_CALLS_PER_HOUR),
                 "ai_max_calls_per_day": int(settings.AI_MAX_CALLS_PER_DAY),
                 "ai_cache_ttl_days": int(settings.AI_CACHE_TTL_DAYS),
@@ -1448,6 +1453,7 @@ def save_config():
                 "ai_search_min_results": int(settings.AI_SEARCH_MIN_RESULTS),
                 "ai_search_fallback_to_rules_on_error": int(settings.AI_SEARCH_FALLBACK_TO_RULES_ON_ERROR),
                 "ai_search_allow_relax_filters": int(settings.AI_SEARCH_ALLOW_RELAX_FILTERS),
+                "ai_search_match_include_reasoning": int(settings.AI_SEARCH_MATCH_INCLUDE_REASONING),
                 "ai_postprocess_match_enabled": int(settings.AI_POSTPROCESS_MATCH_ENABLED),
                 "ai_postprocess_match_only_on_failure": int(settings.AI_POSTPROCESS_MATCH_ONLY_ON_FAILURE),
                 "ai_postprocess_match_cooldown_hours_per_file": int(settings.AI_POSTPROCESS_MATCH_COOLDOWN_HOURS_PER_FILE),

@@ -65,7 +65,7 @@ ANIME_SPLIT_HOME_IN_TABS = False
 
 # AI Configuration - Master Settings
 AI_ENABLED = False
-AI_REQUEST_TIMEOUT = 30
+AI_REQUEST_TIMEOUT = 120  # seconds; CLI extended-thinking batches need headroom (clamp 30..300)
 AI_CONFIDENCE_THRESHOLD = 0.80
 AI_NOTIFY_ON_FALLBACK_FAILURE = True
 
@@ -79,6 +79,11 @@ ANTHROPIC_MODEL = "claude-sonnet-4-6"
 # Claude Code CLI provider settings (used when AI_PROVIDER == "cli")
 AI_CLI_PATH = ""  # optional explicit path to the `claude` binary ("" = auto-detect on PATH)
 AI_CLI_MODEL = "sonnet"  # model alias ("sonnet"/"opus"/"haiku") or a full model id
+# Reasoning effort passed to the CLI as `--effort`. The CLI defaults to high effort, which makes
+# the model generate thousands of internal "thinking" tokens for batched matching tasks (slow, and
+# it can exceed AI_REQUEST_TIMEOUT). "low" is the right default for SickChill's bounded classification
+# tasks; raise it only if match quality suffers. Also drives the search-matcher batch size.
+AI_CLI_EFFORT = "low"  # one of: low / medium / high / xhigh / max
 
 # AI Throttling / Budgeting
 AI_MAX_CALLS_PER_HOUR = 20
@@ -97,6 +102,11 @@ AI_SEARCH_MIN_RESULTS = 1
 # not currently read by any logic (only persisted/exposed in the UI).
 AI_SEARCH_FALLBACK_TO_RULES_ON_ERROR = True
 AI_SEARCH_ALLOW_RELAX_FILTERS = False
+# Include the per-match free-text "reasoning" field in the AI search-matcher response. It is
+# diagnostic-only (never used in matching) and, multiplied across a batch, dominates output token
+# count and generation time (the Claude CLI ignores max_tokens), which can blow past the request
+# timeout. Default off: the model still reasons internally, it just does not emit the prose.
+AI_SEARCH_MATCH_INCLUDE_REASONING = False
 
 # AI Post-Processing (Fallback Match) Settings
 AI_POSTPROCESS_MATCH_ENABLED = False

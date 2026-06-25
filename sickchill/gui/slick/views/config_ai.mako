@@ -137,6 +137,20 @@
 
                                     <div class="field-pair row">
                                         <div class="col-lg-3 col-md-4 col-sm-5 col-xs-12">
+                                            <label class="component-title">${_('AI Effort')}</label>
+                                        </div>
+                                        <div class="col-lg-9 col-md-8 col-sm-7 col-xs-12 component-desc">
+                                            <select id="ai_cli_effort" name="ai_cli_effort" class="form-control input-sm input250">
+                                                % for level, level_name in ClaudeCLIClient.SUPPORTED_EFFORTS.items():
+                                                    <option value="${level}" ${selected(settings.AI_CLI_EFFORT == level)}>${level_name}</option>
+                                                % endfor
+                                            </select>
+                                            <label for="ai_cli_effort">${_('reasoning effort passed to the CLI; lower is much faster and is plenty for matching (higher effort also uses smaller batches)')}</label>
+                                        </div>
+                                    </div>
+
+                                    <div class="field-pair row">
+                                        <div class="col-lg-3 col-md-4 col-sm-5 col-xs-12">
                                             <label class="component-title">${_('CLI Status')}</label>
                                         </div>
                                         <div class="col-lg-9 col-md-8 col-sm-7 col-xs-12 component-desc">
@@ -157,10 +171,10 @@
                                         <label class="component-title">${_('Request Timeout')}</label>
                                     </div>
                                     <div class="col-lg-9 col-md-8 col-sm-7 col-xs-12 component-desc">
-                                        <input type="number" min="5" max="120" step="5" name="ai_request_timeout"
+                                        <input type="number" min="30" max="300" step="5" name="ai_request_timeout"
                                                id="ai_request_timeout" value="${settings.AI_REQUEST_TIMEOUT}"
                                                class="form-control input-sm input75"/>
-                                        <label for="ai_request_timeout">${_('seconds to wait for AI response (default: 30)')}</label>
+                                        <label for="ai_request_timeout">${_('seconds to wait for AI response (default: 120)')}</label>
                                     </div>
                                 </div>
 
@@ -575,13 +589,15 @@ $(document).ready(function() {
         var resultSpan = $('#testClaudeCLI-result');
         var cliPath = $('#ai_cli_path').val();
         var model = $('#ai_cli_model').val();
+        var effort = $('#ai_cli_effort').val();
 
         btn.prop('disabled', true);
         resultSpan.html('<i class="fa fa-spinner fa-spin"></i> ' + ${json.dumps(_("Testing...")) | n});
 
         $.post('${scRoot}/config/ai/testClaudeCLI', {
             cli_path: cliPath,
-            model: model
+            model: model,
+            effort: effort
         }).done(function(data) {
             var isSuccess = data.startsWith('Success');
             var span = $('<span></span>').addClass(isSuccess ? 'text-success' : 'text-danger');

@@ -115,6 +115,21 @@ class TestCliMakeRequest(unittest.TestCase):
         self.assertIn("BE CAREFUL", sys_value)
         self.assertIn("JSON", sys_value)
 
+    def test_effort_flag_defaults_to_low_in_argv(self):
+        popen = FakePopen(stdout=_envelope(result="{}"))
+        with mock.patch(f"{CLI}.subprocess.Popen", return_value=popen) as m:
+            _client()._make_request("p", 512, None)
+        argv = m.call_args[0][0]
+        self.assertIn("--effort", argv)
+        self.assertEqual(argv[argv.index("--effort") + 1], "low")
+
+    def test_effort_flag_uses_configured_level(self):
+        popen = FakePopen(stdout=_envelope(result="{}"))
+        with mock.patch(f"{CLI}.subprocess.Popen", return_value=popen) as m:
+            _client(effort="high")._make_request("p", 512, None)
+        argv = m.call_args[0][0]
+        self.assertEqual(argv[argv.index("--effort") + 1], "high")
+
     def test_envelope_error_auth_maps_to_configuration_error(self):
         popen = FakePopen(stdout=_envelope(result="Invalid API key", is_error=True))
         with self.assertRaises(AIConfigurationError):
@@ -433,8 +448,9 @@ class TestProviderSelection(unittest.TestCase):
             AI_PROVIDER="api",
             ANTHROPIC_API_KEY="sk-test",
             ANTHROPIC_MODEL="claude-sonnet-4-20250514",
-            AI_REQUEST_TIMEOUT=30,
+            AI_REQUEST_TIMEOUT=120,
             AI_CLI_MODEL="sonnet",
+            AI_CLI_EFFORT="low",
             AI_CLI_PATH="",
         )
         defaults.update(over)
@@ -466,6 +482,16 @@ class TestProviderSelection(unittest.TestCase):
         # CLI provider does not need an API key.
         with mock.patch.multiple("sickchill.settings", **self._settings(AI_PROVIDER="cli", ANTHROPIC_API_KEY=None)):
             self.assertIsInstance(ai.get_client(), ClaudeCLIClient)
+
+
+class TestEffortValidation(unittest.TestCase):
+    def test_invalid_effort_falls_back_to_low(self):
+        self.assertEqual(ClaudeCLIClient(effort="bogus").effort, "low")
+        self.assertEqual(ClaudeCLIClient(effort="").effort, "low")
+
+    def test_valid_efforts_preserved(self):
+        for level in ClaudeCLIClient.SUPPORTED_EFFORTS:
+            self.assertEqual(ClaudeCLIClient(effort=level).effort, level)
 
 
 if __name__ == "__main__":

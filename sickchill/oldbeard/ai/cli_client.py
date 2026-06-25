@@ -101,21 +101,36 @@ class ClaudeCLIClient(BaseAIClient):
     DEFAULT_MODEL = "sonnet"
     DEFAULT_TIMEOUT = 60
 
+    # Reasoning effort levels accepted by `claude --effort`. Higher = more internal thinking
+    # (slower, more tokens). "low" is the default for SickChill's bounded JSON tasks.
+    SUPPORTED_EFFORTS = {
+        "low": "Low (fastest, recommended)",
+        "medium": "Medium",
+        "high": "High",
+        "xhigh": "Extra high",
+        "max": "Maximum (slowest)",
+    }
+    DEFAULT_EFFORT = "low"
+
     def __init__(
         self,
         model: str = DEFAULT_MODEL,
         timeout: int = DEFAULT_TIMEOUT,
         cli_path: str = "",
+        effort: str = DEFAULT_EFFORT,
     ):
         """
         Args:
             model: Model alias ("sonnet"/"opus"/"haiku") or a full model id.
             timeout: Per-call subprocess timeout in seconds.
             cli_path: Optional explicit path to the ``claude`` binary.
+            effort: Reasoning effort passed to ``--effort`` (one of SUPPORTED_EFFORTS);
+                anything unrecognized falls back to DEFAULT_EFFORT.
         """
         self.model = model or self.DEFAULT_MODEL
         self.timeout = timeout if timeout and timeout > 0 else self.DEFAULT_TIMEOUT
         self.cli_path = cli_path or ""
+        self.effort = effort if effort in self.SUPPORTED_EFFORTS else self.DEFAULT_EFFORT
         self._binary: Optional[str] = None
         self._binary_resolved = False
 
@@ -309,6 +324,8 @@ class ClaudeCLIClient(BaseAIClient):
             "json",
             "--model",
             self.model,
+            "--effort",
+            self.effort,
             "--tools",
             "",
             "--strict-mcp-config",

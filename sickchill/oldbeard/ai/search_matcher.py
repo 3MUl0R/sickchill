@@ -36,7 +36,16 @@ logger = logging.getLogger(__name__)
 # Cap on how many dropped releases we hand to the AI in one request (keeps the prompt and
 # response bounded; the throttle already bounds how often we call at all). Applied AFTER de-duping,
 # since the same release URL is returned by many overlapping per-episode/free-text queries.
-MAX_RELEASES_PER_REQUEST = 40
+# Effort-dependent: higher reasoning effort generates far more thinking tokens per release (slower,
+# closer to the request timeout), so we hand it fewer releases. Read at call time so a settings
+# change takes effect without reimport.
+_HIGH_EFFORTS = ("high", "xhigh", "max")
+MAX_RELEASES_HIGH_EFFORT = 20
+MAX_RELEASES_DEFAULT = 30
+
+
+def _max_releases_per_request() -> int:
+    return MAX_RELEASES_HIGH_EFFORT if getattr(settings, "AI_CLI_EFFORT", "low") in _HIGH_EFFORTS else MAX_RELEASES_DEFAULT
 
 # Cooldown for an AUTOMATIC search-match attempt, scoped per (show, provider, search_mode, season).
 # Short by design: a backlog runs one season at a time, so the matcher must be free to fire for every
@@ -209,23 +218,29 @@ def match_results(
 
     # De-dupe before capping so the cap holds diverse releases, not duplicates of a few episodes.
     deduped = _dedupe_unmatched(unmatched_items)
-    items = deduped[:MAX_RELEASES_PER_REQUEST]
+    cap = _max_releases_per_request()
+    items = deduped[:cap]
     if len(unmatched_items) != len(deduped):
         logger.debug(f"AI search matching: de-duped {len(unmatched_items)} dropped releases to {len(deduped)} for {show.name}")
     if len(deduped) > len(items):
         logger.warning(
-            f"AI search matching: {len(deduped)} unique releases exceeds cap {MAX_RELEASES_PER_REQUEST} for {show.name}; "
+            f"AI search matching: {len(deduped)} unique releases exceeds cap {cap} for {show.name}; "
             f"{len(deduped) - len(items)} not sent to AI this pass"
         )
 
     try:
         template = _load_prompt_template()
         aliases = _get_aliases(show)
+        # The per-match "reasoning" prose is diagnostic-only and dominates output size; only request
+        # it when explicitly enabled. The comma lives inside the substituted value so the JSON example
+        # stays valid when reasoning is omitted.
+        reasoning_field = ',\n      "reasoning": "<brief explanation>"' if settings.AI_SEARCH_MATCH_INCLUDE_REASONING else ""
         prompt = template.format(
             show_name=show.name,
             aliases=", ".join(aliases) if aliases else "None",
             wanted_json=_build_wanted_json(episodes),
             releases_json=_build_releases_json(items),
+            reasoning_field=reasoning_field,
         )
 
         client = get_client()

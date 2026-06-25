@@ -55,6 +55,12 @@ class TestValidateMatches(unittest.TestCase):
         self.assertEqual(out[0]["url"], "u0")  # original record fields carried through
         self.assertEqual(out[0]["confidence"], 0.95)
 
+    def test_accepts_match_without_reasoning_field(self):
+        # Default (reasoning off) responses omit the key entirely; it must still validate.
+        out = self._validate([{"index": 0, "season": 1, "episode": 8, "confidence": 0.95}])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["reasoning"], "No reasoning provided")
+
     def test_rejects_out_of_range_index(self):
         self.assertEqual(self._validate([{"index": 5, "season": 1, "episode": 8, "confidence": 0.95}]), [])
 
@@ -119,6 +125,10 @@ class TestMatchResults(unittest.TestCase):
         self.mock_settings = self.settings_patcher.start()
         self.addCleanup(self.settings_patcher.stop)
         self.mock_settings.AI_SEARCH_ENABLED = True
+        # Explicit: a bare MagicMock attribute is truthy, which would silently flip reasoning on.
+        self.mock_settings.AI_SEARCH_MATCH_INCLUDE_REASONING = False
+        # Effort drives the batch cap (low/medium -> 30, high/xhigh/max -> 20).
+        self.mock_settings.AI_CLI_EFFORT = "low"
 
         self.prefs_patcher = mock.patch("sickchill.oldbeard.ai.search_matcher.get_preferences_manager")
         mock_get_prefs = self.prefs_patcher.start()
@@ -151,7 +161,7 @@ class TestMatchResults(unittest.TestCase):
 
         self.template_patcher = mock.patch(
             "sickchill.oldbeard.ai.search_matcher._load_prompt_template",
-            return_value="S={show_name} A={aliases} W={wanted_json} R={releases_json}",
+            return_value="S={show_name} A={aliases} W={wanted_json} R={releases_json}{reasoning_field}",
         )
         self.template_patcher.start()
         self.addCleanup(self.template_patcher.stop)
@@ -173,6 +183,38 @@ class TestMatchResults(unittest.TestCase):
         # cost_context passed to the client must be search_match (drives show-scoped cache).
         _, analyze_kwargs = self.client.analyze.call_args
         self.assertEqual(analyze_kwargs.get("cost_context"), "search_match")
+
+    def _sent_prompt(self):
+        search_matcher.match_results(self.show, self.episodes, self.items)
+        _, analyze_kwargs = self.client.analyze.call_args
+        return analyze_kwargs["prompt"]
+
+    def test_reasoning_excluded_from_prompt_by_default(self):
+        # Default (flag off): the reasoning field must not be requested.
+        self.assertNotIn('"reasoning"', self._sent_prompt())
+
+    def test_reasoning_included_in_prompt_when_enabled(self):
+        self.mock_settings.AI_SEARCH_MATCH_INCLUDE_REASONING = True
+        self.assertIn('"reasoning": "<brief explanation>"', self._sent_prompt())
+
+    def _many_items(self, n):
+        return [
+            {"item": {}, "title": f"[Fansub] Wagnaria!! - {i:02d}", "url": f"u{i}", "size": 300 * 1024 * 1024}
+            for i in range(n)
+        ]
+
+    def test_caps_releases_low_effort_thirty(self):
+        # 35 distinct-URL releases survive de-dup; low effort -> only 30 sent.
+        self.mock_settings.AI_CLI_EFFORT = "low"
+        self.items = self._many_items(35)
+        # one "size_mb" entry per release in the serialized prompt payload
+        self.assertEqual(self._sent_prompt().count('"size_mb"'), 30)
+
+    def test_caps_releases_high_effort_twenty(self):
+        # High effort costs far more thinking per release, so the cap tightens to 20.
+        self.mock_settings.AI_CLI_EFFORT = "high"
+        self.items = self._many_items(35)
+        self.assertEqual(self._sent_prompt().count('"size_mb"'), 20)
 
     def test_cache_hit_does_not_bill_budget(self):
         self.client.analyze.return_value = (
@@ -361,6 +403,55 @@ class TestCacheScopeGate(unittest.TestCase):
 
     def test_postprocess_is_file_scoped(self):
         self.assertEqual(self._scope_for("postprocess"), "file")
+
+
+class TestPromptTemplate(unittest.TestCase):
+    """Format the REAL search_match.txt to catch brace-escaping / dangling-comma regressions."""
+
+    def _format(self, reasoning_field):
+        template = search_matcher._load_prompt_template()
+        return template.format(
+            show_name="Bleach",
+            aliases="None",
+            wanted_json="[]",
+            releases_json="[]",
+            reasoning_field=reasoning_field,
+        )
+
+    def test_formats_without_reasoning_no_dangling_comma(self):
+        out = self._format("")  # default (off)
+        # The instructional text may mention the word "reasoning"; what must be absent is the
+        # response *field*.
+        self.assertNotIn('"reasoning":', out)
+        self.assertIn("<0.0-1.0>", out)
+        self.assertNotIn("<0.0-1.0>,", out)  # confidence is the last field; no trailing comma
+
+    def test_formats_with_reasoning_when_enabled(self):
+        out = self._format(',\n      "reasoning": "<brief explanation>"')
+        self.assertIn('"reasoning": "<brief explanation>"', out)
+        self.assertIn("<0.0-1.0>,", out)
+
+    def test_template_has_no_unexpected_format_fields(self):
+        # If a literal { were left unescaped the .format above would already KeyError; this also
+        # guards the exact placeholder name the matcher passes.
+        self.assertIn("{reasoning_field}", search_matcher._load_prompt_template())
+
+
+class TestReleaseCap(unittest.TestCase):
+    def _cap_for(self, effort):
+        with mock.patch.object(search_matcher.settings, "AI_CLI_EFFORT", effort, create=True):
+            return search_matcher._max_releases_per_request()
+
+    def test_low_and_medium_effort_cap_thirty(self):
+        self.assertEqual(self._cap_for("low"), 30)
+        self.assertEqual(self._cap_for("medium"), 30)
+
+    def test_high_efforts_cap_twenty(self):
+        for effort in ("high", "xhigh", "max"):
+            self.assertEqual(self._cap_for(effort), 20)
+
+    def test_unknown_effort_defaults_to_thirty(self):
+        self.assertEqual(self._cap_for("bogus"), 30)
 
 
 if __name__ == "__main__":

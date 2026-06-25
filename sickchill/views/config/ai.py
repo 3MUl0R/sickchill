@@ -98,10 +98,11 @@ class ConfigAI(Config):
         old_provider = settings.AI_PROVIDER
         old_cli_path = settings.AI_CLI_PATH
         old_cli_model = settings.AI_CLI_MODEL
+        old_cli_effort = settings.AI_CLI_EFFORT
 
         # Master AI settings
         settings.AI_ENABLED = config.checkbox_to_value(self.get_body_argument("ai_enabled", default=None))
-        settings.AI_REQUEST_TIMEOUT = try_int(self.get_body_argument("ai_request_timeout", default=30), 30)
+        settings.AI_REQUEST_TIMEOUT = max(30, min(300, try_int(self.get_body_argument("ai_request_timeout", default=120), 120)))
         settings.AI_CONFIDENCE_THRESHOLD = _try_float(
             self.get_body_argument("ai_confidence_threshold", default="0.80"),
             default=0.80,
@@ -131,6 +132,8 @@ class ConfigAI(Config):
             if posted_cli_path is not None:
                 settings.AI_CLI_PATH = posted_cli_path.strip()
         settings.AI_CLI_MODEL = self.get_body_argument("ai_cli_model", default=settings.AI_CLI_MODEL or "sonnet")
+        posted_effort = self.get_body_argument("ai_cli_effort", default=settings.AI_CLI_EFFORT or "low")
+        settings.AI_CLI_EFFORT = posted_effort if posted_effort in ("low", "medium", "high", "xhigh", "max") else "low"
 
         # Reset client if any provider-affecting setting changed
         if (
@@ -140,6 +143,7 @@ class ConfigAI(Config):
             or settings.AI_REQUEST_TIMEOUT != old_timeout
             or settings.AI_CLI_PATH != old_cli_path
             or settings.AI_CLI_MODEL != old_cli_model
+            or settings.AI_CLI_EFFORT != old_cli_effort
         ):
             from sickchill.oldbeard.ai import reset_client
 
@@ -221,8 +225,10 @@ class ConfigAI(Config):
 
             cli_path = self.get_body_argument("cli_path", default=settings.AI_CLI_PATH) or ""
             model = self.get_body_argument("model", default=settings.AI_CLI_MODEL) or "sonnet"
+            posted_effort = self.get_body_argument("effort", default=settings.AI_CLI_EFFORT) or "low"
+            effort = posted_effort if posted_effort in ClaudeCLIClient.SUPPORTED_EFFORTS else "low"
 
-            client = ClaudeCLIClient(model=model, timeout=max(int(settings.AI_REQUEST_TIMEOUT), 30), cli_path=cli_path.strip())
+            client = ClaudeCLIClient(model=model, timeout=max(int(settings.AI_REQUEST_TIMEOUT), 30), cli_path=cli_path.strip(), effort=effort)
             success, message = client.test_connection()
 
             # Escape the message to prevent XSS
