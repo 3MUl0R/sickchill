@@ -191,23 +191,49 @@ def process_dir(process_path, release_name=None, process_method=None, force=Fals
                 continue
 
             video_files = list(filter(is_media_file, filenames))
+            failed_files = []
             if video_files:
-                process_media(current_directory, video_files, release_name, process_method, force, is_priority, result)
+                failed_files = process_media(current_directory, video_files, release_name, process_method, force, is_priority, result)
             else:
                 result.result = False
 
-            # Delete all file not needed and avoid deleting files if Manual PostProcessing
-            if not (process_method == "move" and result.result) or (mode == "manual" and not delete_on):
+            # Auto-cleanup only applies to the "move" method (copy/hardlink/symlink leave the
+            # source in place), to auto mode or manual-with-delete, and only when we actually
+            # processed media in this folder this pass.
+            if process_method != "move" or (mode == "manual" and not delete_on) or not video_files:
                 continue
 
-            # noinspection PyTypeChecker
-            unwanted_files = [x for x in filenames if x in video_files + rar_files]
-            if unwanted_files:
-                result.output += log_helper(_("Found unwanted files: {unwanted_files}").format(unwanted_files=unwanted_files), logger.DEBUG)
+            # Season-aware reaping: never delete a folder while it still holds a video we did
+            # not capture. A file is "uncaptured" only when its post-processing FAILED (failed
+            # parse/match, or still on an AI-match cooldown); files that were moved, matched an
+            # existing destination, or were already processed are "handled". If anything failed,
+            # leave the whole folder so the next scheduler pass (after any AI cooldown) can
+            # retry before the folder is ever reaped.
+            if failed_files:
+                result.output += log_helper(
+                    f"Not reaping {current_directory}: {len(failed_files)} unprocessed video file(s) remain: {failed_files}",
+                    logger.DEBUG,
+                )
+                continue
 
-            delete_folder(os.path.join(current_directory, "@eaDir"), False)
-            delete_files(current_directory, unwanted_files, result)
-            if delete_folder(current_directory, check_empty=not delete_on):
+            # The Synology metadata subfolder never holds wanted media: remove it and drop it
+            # from the walk list so os.walk does not try to descend into a now-deleted dir.
+            if "@eaDir" in directory_names:
+                delete_folder(os.path.join(current_directory, "@eaDir"), False)
+                directory_names[:] = [name for name in directory_names if name != "@eaDir"]
+
+            # Only reap a LEAF release folder. os.walk is top-down, so any remaining child dirs
+            # have NOT been processed yet; rmtree-ing the parent now could delete uncaptured
+            # nested media. Leave such folders for their own pass (the parent is retained).
+            if directory_names:
+                result.output += log_helper(
+                    f"Not reaping {current_directory}: unprocessed subdirectories remain: {directory_names}", logger.DEBUG
+                )
+                continue
+
+            # Leaf folder, all videos handled -> remove it and any leftover junk (samples, nfo,
+            # stray associated files, consumed duplicate sources, etc.).
+            if delete_folder(current_directory, check_empty=False):
                 result.output += log_helper(_("Deleted folder: {current_directory}").format(current_directory=current_directory), logger.DEBUG)
 
         # For processing extracted rars, only allow methods 'move' and 'copy'.
@@ -502,6 +528,7 @@ def process_media(process_path, video_files, release_name, process_method, force
     """
 
     processor = None
+    failed_files = []
     for cur_video_file in video_files:
         cur_video_file_path = os.path.join(process_path, cur_video_file)
 
@@ -526,6 +553,9 @@ def process_media(process_path, video_files, release_name, process_method, force
             result.output += log_helper(f"Processing failed for {cur_video_file_path}: {process_fail_message}", logger.WARNING)
             result.missed_files.append(f"{cur_video_file_path} : Processing failed: {process_fail_message}")
             result.aggresult = False
+            failed_files.append(cur_video_file)
+
+    return failed_files
 
 
 def process_failed(process_path, release_name, result):
