@@ -301,6 +301,7 @@ def validate_dir(process_path, release_name, failed, result):
             result.output += log_helper("Cannot process an episode that's already been moved to its show dir, skipping " + process_path, logger.WARNING)
             return False
 
+    media_seen = False
     for current_directory, directory_names, filenames in os.walk(process_path, topdown=False, followlinks=settings.PROCESSOR_FOLLOW_SYMLINKS):
         sync_files = list(filter(is_sync_file, filenames))
         if sync_files and settings.POSTPONE_IF_SYNC_FILES:
@@ -313,6 +314,9 @@ def validate_dir(process_path, release_name, failed, result):
         if settings.UNPACK == settings.UNPACK_PROCESS_CONTENTS:
             found_files += list(filter(is_rar_file, filenames))
 
+        if found_files:
+            media_seen = True
+
         for found_file in found_files:
             if current_directory != settings.TV_DOWNLOAD_DIR and found_files:
                 # pass 'current directory/filename' as one string to NameParser
@@ -320,6 +324,16 @@ def validate_dir(process_path, release_name, failed, result):
 
             if postProcessor.guessit_findit(found_file):
                 return True
+
+    # Rule-based parsing identified nothing. If AI post-process matching is enabled, still
+    # allow the folder through so the AI fallback in PostProcessor can attempt to identify
+    # the file(s) (e.g. anime releases whose names don't parse to the SC show, like
+    # "[Moozzi2] Working S3-09 ..." -> Wagnaria!!). The matcher is throttled per-file
+    # (cooldown + budget + response cache), so this does not spam the AI provider on
+    # repeated scheduler passes.
+    if media_seen and settings.AI_ENABLED and settings.AI_POSTPROCESS_MATCH_ENABLED:
+        result.output += log_helper(f"{process_path} : no rule-based match; deferring to AI post-process matcher", logger.DEBUG)
+        return True
 
     result.output += log_helper(f"{process_path} : No processable items found in folder", logger.DEBUG)
     return False
