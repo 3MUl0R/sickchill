@@ -100,7 +100,18 @@ function updateImages(data) {
             } else if (ep.searchstatus.toLowerCase() === 'finished') {
                 icon.prop('class', searchClass);
                 if (ep.quality !== 'N/A') {
-                    link.prop('class', 'epRetry');
+                    // Keep the link's class and href consistent with the server's intent.
+                    // A retry (mark-as-failed) link is only valid when failed-download
+                    // handling is enabled; otherwise keep it a plain search link so the
+                    // "mark as failed" modal never appears for a no-op action.
+                    const href = link.prop('href') || '';
+                    if (ep.retryEnabled) {
+                        link.prop('class', 'epRetry');
+                        link.prop('href', href.replace('searchEpisode', 'retryEpisode'));
+                    } else {
+                        link.prop('class', 'epSearch');
+                        link.prop('href', href.replace('retryEpisode', 'searchEpisode'));
+                    }
                 }
 
                 icon.prop('title', 'Search');
@@ -166,7 +177,13 @@ $(document).ready(checkManualSearches);
 
         let url = selectedEpisode.prop('href');
 
-        if (failedDownload === false) {
+        // Route to the correct endpoint based on the user's "mark as failed" answer.
+        // Only a retry link (failed-download handling enabled + episode snatched/downloaded)
+        // may go to retryEpisode; everything else is a plain searchEpisode. This is robust
+        // even if the href and class momentarily disagree.
+        if (selectedEpisode.hasClass('epRetry') && failedDownload === true) {
+            url = url.replace('searchEpisode', 'retryEpisode');
+        } else {
             url = url.replace('retryEpisode', 'searchEpisode');
         }
 
@@ -227,6 +244,11 @@ $(document).ready(checkManualSearches);
             }
 
             selectedEpisode = $(this);
+
+            // Reset per-click state so a prior modal answer can't leak into this search
+            // (e.g. a previous "yes, mark as failed" or "yes, include quality").
+            failedDownload = false;
+            qualityDownload = false;
 
             if ($(this).hasClass('epRetry')) {
                 $('#manualSearchModalFailed').modal('show');

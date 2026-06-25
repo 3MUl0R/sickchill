@@ -239,6 +239,7 @@
                                     <li><a href="${static_url('config/postProcessing/', include_version=False)}"><i class="fa fa-fw fa-refresh"></i>&nbsp;${_('Post Processing')}</a></li>
                                     <li><a href="${static_url('config/notifications/', include_version=False)}"><i class="fa fa-fw fa-bell-o"></i>&nbsp;${_('Notifications')}</a></li>
                                     <li><a href="${static_url('config/anime/', include_version=False)}"><i class="fa fa-fw fa-eye"></i>&nbsp;${_('Anime')}</a></li>
+                                    <li><a href="${static_url('config/ai/', include_version=False)}"><i class="fa fa-fw fa-magic"></i>&nbsp;${_('AI Assistant')}</a></li>
                                     <li role="separator" class="divider"></li>
                                     <li><a href="${static_url('apibuilder', include_version=False)}"><i class="fa fa-fw fa-info-circle"></i>&nbsp;${_('API Builder')}</a></li>
                                 </ul>

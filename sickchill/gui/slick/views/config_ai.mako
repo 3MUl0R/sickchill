@@ -559,12 +559,11 @@
                 </div>
             </div>
 
-            <!-- Save Button -->
-            <div class="row">
-                <div class="col-md-12">
-                    <input type="submit" class="btn config_submitter" value="${_('Save Changes')}" />
-                </div>
-            </div>
+            <%doc>
+                No page-local "Save Changes" button here: the shared one rendered by
+                layouts/config.mako (#config_save_button, .config_submitter) submits #configForm.
+                A second button caused a duplicate in the lower-left of this page.
+            </%doc>
 
         </div>
     </form>

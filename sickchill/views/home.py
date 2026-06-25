@@ -1963,6 +1963,7 @@ class Home(WebRoot):
                         "overview": Overview.overviewStrings[show_obj.get_overview(search_thread.segment.status)],
                         "location": relative_ep_location(search_thread.segment.location, show_obj.get_location),
                         "size": pretty_file_size(search_thread.segment.file_size) if search_thread.segment.file_size else "",
+                        "retryEnabled": settings.USE_FAILED_DOWNLOADS,
                     }
                 )
             else:
@@ -1980,6 +1981,7 @@ class Home(WebRoot):
                             "overview": Overview.overviewStrings[show_obj.get_overview(episode_object.status)],
                             "location": relative_ep_location(episode_object.location, show_obj.get_location),
                             "size": pretty_file_size(episode_object.file_size) if episode_object.file_size else "",
+                            "retryEnabled": settings.USE_FAILED_DOWNLOADS,
                         }
                     )
 
