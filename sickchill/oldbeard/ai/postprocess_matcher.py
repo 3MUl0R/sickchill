@@ -347,31 +347,35 @@ def match_file(
             return_meta=True,
         )
 
-        # Commit the attempt: a cache hit still records the cooldown but must not bill the
-        # hourly/daily call budget (no API call was made).
-        throttle.commit_postprocess_attempt(file_path, count_budget=not was_cached)
+        # Determine the outcome before committing so the per-file cooldown is only imposed when
+        # we did NOT get a usable match. A confident match commits with set_cooldown=False so a
+        # later post-processing failure (e.g. episode lookup/move) can be retried immediately;
+        # the 30-day response cache still prevents re-billing the AI. count_budget=not was_cached
+        # so a cache hit records bookkeeping without billing the hourly/daily call budget.
+        is_valid, rejection_reason = _validate_match_result(response, candidates)
+        show_id = response.get("show_indexer_id", -1) if is_valid else -1
+        confidence = response.get("confidence", 0.0)
+        reasoning = response.get("reasoning", "No reasoning provided")
+        min_confidence = settings.AI_POSTPROCESS_MATCH_MIN_CONFIDENCE
+        matched = is_valid and show_id > 0 and confidence >= min_confidence
+
+        throttle.commit_postprocess_attempt(file_path, count_budget=not was_cached, set_cooldown=not matched)
 
         # Validate response
-        is_valid, rejection_reason = _validate_match_result(response, candidates)
         if not is_valid:
             logger.warning(f"AI returned invalid match result: {rejection_reason}")
             _notify_match_failure(filename, f"Invalid response: {rejection_reason}")
             return None
 
-        # Check if AI found a match
-        show_id = response.get("show_indexer_id", -1)
-        confidence = response.get("confidence", 0.0)
-        reasoning = response.get("reasoning", "No reasoning provided")
-
         logger.debug(f"AI match response: show_id={show_id}, confidence={confidence}, reason={reasoning}")
 
+        # Check if AI found a match
         if show_id == -1:
             logger.info(f"AI could not identify file: {reasoning}")
             _notify_match_failure(filename, reasoning)
             return None
 
         # Check confidence threshold
-        min_confidence = settings.AI_POSTPROCESS_MATCH_MIN_CONFIDENCE
         if confidence < min_confidence:
             reason = f"AI confidence too low ({confidence:.0%})"
             logger.info(f"AI match confidence {confidence:.2f} below threshold {min_confidence:.2f}: {reasoning}")

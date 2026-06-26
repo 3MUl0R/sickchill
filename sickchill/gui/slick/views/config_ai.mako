@@ -378,7 +378,7 @@
                                         <input type="number" min="1" max="168" step="1" name="ai_postprocess_match_cooldown_hours_per_file"
                                                id="ai_postprocess_match_cooldown_hours_per_file" value="${settings.AI_POSTPROCESS_MATCH_COOLDOWN_HOURS_PER_FILE}"
                                                class="form-control input-sm input75"/>
-                                        <label for="ai_postprocess_match_cooldown_hours_per_file">${_('hours between AI matching attempts per file (default: 72)')}</label>
+                                        <label for="ai_postprocess_match_cooldown_hours_per_file">${_('hours before re-attempting AI matching on an unmatched file (default: 1; a confident match is never cooldown-locked)')}</label>
                                     </div>
                                 </div>
 

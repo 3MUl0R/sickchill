@@ -157,6 +157,10 @@ class TestMatchFileFunction(unittest.TestCase):
         self.assertEqual(result["show_indexer_id"], 12345)
         self.assertEqual(result["season"], 1)
         self.assertEqual(result["episodes"], [5])
+        # A confident match must NOT cooldown-lock the file (so a later post-processing
+        # failure can be retried immediately).
+        self.mock_throttle.commit_postprocess_attempt.assert_called_once()
+        self.assertFalse(self.mock_throttle.commit_postprocess_attempt.call_args.kwargs["set_cooldown"])
 
     def test_cache_hit_does_not_bill_budget(self):
         """A cached match still commits the cooldown but with count_budget=False."""
@@ -189,6 +193,8 @@ class TestMatchFileFunction(unittest.TestCase):
         result = match_file("/path/to/file.mkv", "random_file.mkv", "random")
 
         self.assertIsNone(result)
+        # A genuine no-match imposes the per-file cooldown to avoid hammering.
+        self.assertTrue(self.mock_throttle.commit_postprocess_attempt.call_args.kwargs["set_cooldown"])
 
     def test_returns_none_when_confidence_too_low(self):
         """Test that None is returned when confidence is below threshold."""
@@ -205,6 +211,8 @@ class TestMatchFileFunction(unittest.TestCase):
         result = match_file("/path/to/file.mkv", "file.mkv", "folder")
 
         self.assertIsNone(result)
+        # Below-threshold confidence counts as no usable match -> cooldown imposed.
+        self.assertTrue(self.mock_throttle.commit_postprocess_attempt.call_args.kwargs["set_cooldown"])
 
     def test_returns_none_when_invalid_show_id(self):
         """Test that None is returned when AI returns invalid show ID."""
@@ -221,6 +229,8 @@ class TestMatchFileFunction(unittest.TestCase):
         result = match_file("/path/to/file.mkv", "file.mkv", "folder")
 
         self.assertIsNone(result)
+        # An invalid show id (not in candidates) is not a usable match -> cooldown imposed.
+        self.assertTrue(self.mock_throttle.commit_postprocess_attempt.call_args.kwargs["set_cooldown"])
 
 
 class TestShouldUseAIMatch(unittest.TestCase):

@@ -55,6 +55,13 @@ class ThrottleManager:
     SCOPE_SHOW = "show"
     SCOPE_FILE = "file"
 
+    # The CLI/subscription provider has no per-call charge, so the paid-API hourly/daily call
+    # budget should not throttle it (it only choked legitimate bulk post-processing). We still
+    # keep a high runaway backstop to bound a buggy loop; real subscription-side rate limits
+    # surface as provider errors, not as a SickChill budget block.
+    CLI_BUDGET_BACKSTOP_PER_HOUR = 1000
+    CLI_BUDGET_BACKSTOP_PER_DAY = 10000
+
     @staticmethod
     def _pending_key(context: str, scope_key: str) -> str:
         """Key for the in-memory reservation map, namespaced by context so the same
@@ -289,9 +296,9 @@ class ThrottleManager:
             logger.debug("AI post-process reservation created for file")
             return True
 
-    def commit_postprocess_attempt(self, file_path: str, count_budget: bool = True, context: Optional[str] = None) -> None:
+    def commit_postprocess_attempt(self, file_path: str, count_budget: bool = True, context: Optional[str] = None, set_cooldown: bool = True) -> None:
         """
-        Commit a reserved post-process attempt after a successful response.
+        Commit a reserved post-process attempt after a response.
 
         This records the attempt in the database and releases the reservation.
 
@@ -300,12 +307,15 @@ class ThrottleManager:
             count_budget: Pass False when the response came from the cache (no API call), so
                 the cooldown is recorded but the call budget is not consumed.
             context: Throttle context (must match the one used to reserve).
+            set_cooldown: Pass False after a confident match so the file is not cooldown-locked
+                (a later post-processing failure can then be retried immediately). Pass True
+                (default) for a no-match/low-confidence/invalid result to avoid hammering.
         """
         context = context or self.CONTEXT_POSTPROCESS
         scope_key = self.get_file_fingerprint(file_path)
 
         # Record the attempt in database
-        self.record_attempt(context, self.SCOPE_FILE, scope_key, count_budget=count_budget)
+        self.record_attempt(context, self.SCOPE_FILE, scope_key, count_budget=count_budget, set_cooldown=set_cooldown)
 
         # Release the reservation
         with self._budget_lock:
@@ -332,7 +342,7 @@ class ThrottleManager:
 
         logger.debug("AI post-process reservation released for file")
 
-    def record_attempt(self, context: str, scope: str, scope_key: str, count_budget: bool = True) -> None:
+    def record_attempt(self, context: str, scope: str, scope_key: str, count_budget: bool = True, set_cooldown: bool = True) -> None:
         """
         Record that an AI request was attempted.
 
@@ -344,21 +354,27 @@ class ThrottleManager:
                 budget. Pass False for a free response-cache hit: the cooldown timestamp is
                 still recorded (so a cached negative result does not re-fire every cycle) but
                 no real API call was made, so it must not consume the budget.
+            set_cooldown: When True (default) the ``last_attempt`` cooldown timestamp is written
+                so the scope is gated for the cooldown window. Pass False to count the call (and
+                budget) WITHOUT imposing the cooldown — used after a confident post-process match
+                so a later post-processing failure can be retried immediately (the 30-day
+                response cache still prevents re-billing the AI).
         """
         now = time.time()
-        cache_db = self._get_db()
 
-        # Update or insert throttle record
-        cache_db.action(
-            """
-            INSERT OR REPLACE INTO ai_throttle (context, scope, scope_key, last_attempt, last_success)
-            VALUES (?, ?, ?, ?, (
-                SELECT last_success FROM ai_throttle
-                WHERE context = ? AND scope = ? AND scope_key = ?
-            ))
-            """,
-            [context, scope, scope_key, now, context, scope, scope_key],
-        )
+        # Write the cooldown timestamp only when requested. ``last_success`` is preserved.
+        if set_cooldown:
+            cache_db = self._get_db()
+            cache_db.action(
+                """
+                INSERT OR REPLACE INTO ai_throttle (context, scope, scope_key, last_attempt, last_success)
+                VALUES (?, ?, ?, ?, (
+                    SELECT last_success FROM ai_throttle
+                    WHERE context = ? AND scope = ? AND scope_key = ?
+                ))
+                """,
+                [context, scope, scope_key, now, context, scope, scope_key],
+            )
 
         # Track in-memory budget counters (thread-safe) only for real (non-cached) calls.
         if count_budget:
@@ -366,7 +382,7 @@ class ThrottleManager:
                 self._hourly_calls.append(now)
                 self._daily_calls.append(now)
 
-        logger.debug(f"AI request recorded: {context}/{scope}/{scope_key[:20]}... (budget={count_budget})")
+        logger.debug(f"AI request recorded: {context}/{scope}/{scope_key[:20]}... (budget={count_budget}, cooldown={set_cooldown})")
 
     def record_success(self, context: str, scope: str, scope_key: str) -> None:
         """
@@ -380,12 +396,18 @@ class ThrottleManager:
         now = time.time()
         cache_db = self._get_db()
 
+        # Upsert so success is recorded even when no attempt row exists (a confident match
+        # commits with set_cooldown=False and therefore writes no last_attempt row). The
+        # existing last_attempt, if any, is preserved.
         cache_db.action(
             """
-            UPDATE ai_throttle SET last_success = ?
-            WHERE context = ? AND scope = ? AND scope_key = ?
+            INSERT OR REPLACE INTO ai_throttle (context, scope, scope_key, last_attempt, last_success)
+            VALUES (?, ?, ?, (
+                SELECT last_attempt FROM ai_throttle
+                WHERE context = ? AND scope = ? AND scope_key = ?
+            ), ?)
             """,
-            [now, context, scope, scope_key],
+            [context, scope, scope_key, context, scope, scope_key, now],
         )
 
     def record_search_success(self, show, context: Optional[str] = None, scope_key: Optional[str] = None) -> None:
@@ -439,6 +461,18 @@ class ThrottleManager:
             return float(result[0]["last_attempt"])
         return None
 
+    def _budget_limits(self) -> tuple:
+        """
+        Return the (hourly, daily) call-budget limits for the active provider.
+
+        The paid API uses the configured cost caps; the free CLI/subscription provider uses a
+        high runaway backstop instead (no per-call charge). Used by both the budget check and
+        the diagnostics in get_budget_status() so they always agree.
+        """
+        if getattr(settings, "AI_PROVIDER", "api") == "cli":
+            return self.CLI_BUDGET_BACKSTOP_PER_HOUR, self.CLI_BUDGET_BACKSTOP_PER_DAY
+        return settings.AI_MAX_CALLS_PER_HOUR, settings.AI_MAX_CALLS_PER_DAY
+
     def _check_budget_unlocked(self) -> bool:
         """
         Check if we're within hourly and daily budget limits.
@@ -459,8 +493,7 @@ class ThrottleManager:
         self._hourly_calls = [t for t in self._hourly_calls if t > hour_ago]
         self._daily_calls = [t for t in self._daily_calls if t > day_ago]
 
-        hourly_limit = settings.AI_MAX_CALLS_PER_HOUR
-        daily_limit = settings.AI_MAX_CALLS_PER_DAY
+        hourly_limit, daily_limit = self._budget_limits()
 
         if len(self._hourly_calls) >= hourly_limit:
             logger.warning(f"AI hourly budget exceeded ({len(self._hourly_calls)}/{hourly_limit})")
@@ -500,11 +533,12 @@ class ThrottleManager:
             self._hourly_calls = [t for t in self._hourly_calls if t > hour_ago]
             self._daily_calls = [t for t in self._daily_calls if t > day_ago]
 
+            hourly_limit, daily_limit = self._budget_limits()
             return {
                 "hourly_used": len(self._hourly_calls),
-                "hourly_limit": settings.AI_MAX_CALLS_PER_HOUR,
+                "hourly_limit": hourly_limit,
                 "daily_used": len(self._daily_calls),
-                "daily_limit": settings.AI_MAX_CALLS_PER_DAY,
+                "daily_limit": daily_limit,
             }
 
     @staticmethod

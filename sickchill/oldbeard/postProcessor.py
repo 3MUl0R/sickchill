@@ -871,6 +871,15 @@ class PostProcessor(object):
                         self._log(f"AI matched file to {show.name} S{season}E{episodes} (confidence: {ai_result.get('confidence', 0):.0%})", logger.INFO)
                 except Exception as e:
                     self._log(f"Failed to load AI-matched show: {e}", logger.DEBUG)
+            else:
+                # No usable AI match. This is the common reason an anime file with only an
+                # absolute number "silently" fails to post-process; make it explicit (the
+                # throttle logs the specific block reason — budget/cooldown — at DEBUG).
+                self._log(
+                    "AI fallback did not return a usable match (no confident match, or blocked by AI throttle/cooldown); "
+                    "cannot determine the episode for this file",
+                    logger.INFO,
+                )
 
         return show, season, episodes, quality, version
 

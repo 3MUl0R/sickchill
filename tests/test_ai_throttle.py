@@ -160,8 +160,55 @@ class TestBudgetTracking(unittest.TestCase):
         manager.commit_search_attempt(show, count_budget=True)
         self.assertEqual(manager.get_budget_status()["hourly_used"], 1)
 
+    def test_record_attempt_set_cooldown_false_skips_db_but_counts_budget(self):
+        """A confident match commits with set_cooldown=False: budget counted, no cooldown row."""
+        manager = ThrottleManager()
+        # Ignore the CREATE INDEX action from _ensure_tables() during construction.
+        self.mock_db.DBConnection.return_value.action.reset_mock()
+
+        manager.record_attempt("postprocess", "file", "fp", count_budget=True, set_cooldown=False)
+
+        # No last_attempt row written...
+        self.mock_db.DBConnection.return_value.action.assert_not_called()
+        # ...but the call still counts against the budget.
+        self.assertEqual(manager.get_budget_status()["hourly_used"], 1)
+
+    def test_provider_aware_budget_limits(self):
+        """The free CLI provider uses the high backstop; the paid API uses configured caps."""
+        manager = ThrottleManager()
+
+        self.mock_settings.AI_PROVIDER = "api"
+        self.assertEqual(
+            manager._budget_limits(),
+            (self.mock_settings.AI_MAX_CALLS_PER_HOUR, self.mock_settings.AI_MAX_CALLS_PER_DAY),
+        )
+
+        self.mock_settings.AI_PROVIDER = "cli"
+        self.assertEqual(
+            manager._budget_limits(),
+            (ThrottleManager.CLI_BUDGET_BACKSTOP_PER_HOUR, ThrottleManager.CLI_BUDGET_BACKSTOP_PER_DAY),
+        )
+        # Diagnostics must report the same effective limits.
+        status = manager.get_budget_status()
+        self.assertEqual(status["hourly_limit"], ThrottleManager.CLI_BUDGET_BACKSTOP_PER_HOUR)
+        self.assertEqual(status["daily_limit"], ThrottleManager.CLI_BUDGET_BACKSTOP_PER_DAY)
+
+    def test_cli_provider_not_blocked_by_paid_api_limits(self):
+        """With the CLI provider, the tiny paid-API caps must not block bulk post-processing."""
+        self.mock_settings.AI_PROVIDER = "cli"
+        self.mock_settings.AI_MAX_CALLS_PER_HOUR = 2
+        self.mock_settings.AI_MAX_CALLS_PER_DAY = 2
+        manager = ThrottleManager()
+
+        for i in range(10):
+            manager.record_attempt("postprocess", "file", str(i))
+
+        # Paid-API caps would block after 2; the CLI backstop (1000/hr) does not.
+        self.assertTrue(manager._check_budget())
+
     def test_budget_limit_blocks(self):
         """Test that exceeding budget limit returns False."""
+        self.mock_settings.AI_PROVIDER = "api"
         self.mock_settings.AI_MAX_CALLS_PER_HOUR = 2
         manager = ThrottleManager()
 

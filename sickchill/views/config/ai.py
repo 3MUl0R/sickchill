@@ -165,7 +165,7 @@ class ConfigAI(Config):
         # AI Post-Processing Match settings
         settings.AI_POSTPROCESS_MATCH_ENABLED = config.checkbox_to_value(self.get_body_argument("ai_postprocess_match_enabled", default=None))
         settings.AI_POSTPROCESS_MATCH_ONLY_ON_FAILURE = config.checkbox_to_value(self.get_body_argument("ai_postprocess_match_only_on_failure", default=None))
-        settings.AI_POSTPROCESS_MATCH_COOLDOWN_HOURS_PER_FILE = try_int(self.get_body_argument("ai_postprocess_match_cooldown_hours_per_file", default=72), 72)
+        settings.AI_POSTPROCESS_MATCH_COOLDOWN_HOURS_PER_FILE = try_int(self.get_body_argument("ai_postprocess_match_cooldown_hours_per_file", default=1), 1)
         settings.AI_POSTPROCESS_MATCH_MIN_CONFIDENCE = _try_float(
             self.get_body_argument("ai_postprocess_match_min_confidence", default="0.85"),
             default=0.85,
