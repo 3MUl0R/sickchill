@@ -173,6 +173,21 @@ class TestBudgetTracking(unittest.TestCase):
         # ...but the call still counts against the budget.
         self.assertEqual(manager.get_budget_status()["hourly_used"], 1)
 
+    def test_record_success_upserts_preserving_last_attempt(self):
+        """record_success upserts (so a set_cooldown=False match still records success) and
+        preserves any existing last_attempt via subquery rather than UPDATE-only (which would
+        no-op when no row exists)."""
+        manager = ThrottleManager()
+        self.mock_db.DBConnection.return_value.action.reset_mock()
+
+        manager.record_success("postprocess", "file", "fp")
+
+        self.mock_db.DBConnection.return_value.action.assert_called_once()
+        sql = self.mock_db.DBConnection.return_value.action.call_args.args[0]
+        self.assertIn("INSERT OR REPLACE", sql)
+        self.assertIn("last_attempt", sql)  # preserved
+        self.assertIn("last_success", sql)
+
     def test_provider_aware_budget_limits(self):
         """The free CLI provider uses the high backstop; the paid API uses configured caps."""
         manager = ThrottleManager()
