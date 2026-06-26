@@ -339,6 +339,16 @@ class TVShow(object):
                 logger.debug(f"No entries for absolute number: {absolute_number} in show: {self.name} found.")
                 return None
 
+        # Never create/cache a placeholder episode when we couldn't resolve a real season AND
+        # episode (e.g. an absolute-number lookup that matched nothing, or a mis-parse that
+        # yielded absolute_number 0). Otherwise self.episodes[None][None] gets cached and the
+        # early cache check at the top of this method returns it for every later
+        # (season=None, episode=None, absolute_number=X) call, silently poisoning anime
+        # absolute->episode resolution for the rest of the process. Use "is None" so that a
+        # legitimate season/episode 0 (specials) is still handled.
+        if season is None or episode is None:
+            return None
+
         if season not in self.episodes:
             self.episodes[season] = {}
 

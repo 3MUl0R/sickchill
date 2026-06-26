@@ -631,6 +631,36 @@ class BasicFailedTests(conftest.SickChillTestDBCase):
         self._test_names(name_parser, "scene_date_format", lambda x: x + ".avi")
 
 
+class ResolutionGuardTests(conftest.SickChillTestDBCase):
+    """A screen resolution like 1920x1080 must not be parsed as season x episode.
+
+    Regression for BD releases such as '[Moozzi2] <title> - 16 (BD 1920x1080 x265-10Bit Flac)'
+    where the anime_and_normal_x regex used to read 1920x1080 as S1920E1080, which (combined
+    with a get_episode caching bug) poisoned anime absolute->episode resolution.
+    """
+
+    def test_resolution_not_parsed_as_season_episode(self):
+        # _parse_string returns the raw regex parse without the show-resolution that parse() requires.
+        name_parser = parser.NameParser(naming_pattern=True)
+        for name in [
+            "[Moozzi2] Some Anime Title - 16 (BD 1920x1080 x265-10Bit Flac)",
+            "[Group] Another Show - 05 (BD 1280x720)",
+            "Show Title - 07 (3840x2160)",
+        ]:
+            result = name_parser._parse_string(name)
+            for resolution_width in (1920, 1280, 3840):
+                self.assertNotEqual(result.season_number, resolution_width, f"{name!r} parsed width as a season")
+            for resolution_height in (1080, 720, 2160):
+                self.assertNotIn(resolution_height, result.episode_numbers or [], f"{name!r} parsed height as an episode")
+
+    def test_real_nxm_still_parses(self):
+        # A genuine NxM episode notation must still work.
+        name_parser = parser.NameParser(naming_pattern=True)
+        result = name_parser._parse_string("Some Show 3x05 720p")
+        self.assertEqual(result.season_number, 3)
+        self.assertEqual(result.episode_numbers, [5])
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         SUITE = unittest.TestLoader().loadTestsFromName("name_parser_tests.BasicTests.test_" + sys.argv[1])

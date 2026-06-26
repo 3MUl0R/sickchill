@@ -417,7 +417,7 @@ anime_regexes = [
         r"""
      ^(?P<series_name>.+?)[ ._-]+                 # start of string and series name and non optinal separator
      (?P<season_num>\d+)[. _-]*               # S01 and optional separator
-     [xX](?P<ep_num>\d+)                          # epipisode E02
+     [xX](?P<ep_num>(?!(?:480|576|720|1080|1440|2160)\b)\d+)   # episode E02 (not a screen-resolution height, e.g. the 1080 in 1920x1080)
      (([. _-]*e|-)                                # linking e/- char
      (?P<extra_ep_num>\d+))*                      # additional E03/etc
      ([ ._-]{2,}|[ ._]+)                          # if "-" is used to separate at least something else has to be there(->{2,}) "s16e03-04-313-314" would make sens any way
