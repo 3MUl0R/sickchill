@@ -631,6 +631,55 @@ class BasicFailedTests(conftest.SickChillTestDBCase):
         self._test_names(name_parser, "scene_date_format", lambda x: x + ".avi")
 
 
+class SeasonRelativeAnimeTests(conftest.SickChillTestPostProcessorCase):
+    """A per-season anime release (Moozzi2-style) whose title matches a scene exception mapped to a
+    specific season must resolve season-relative (e.g. 'Show II - 5' -> S2E5), not as a series-wide
+    absolute number (which would land in season 1)."""
+
+    def test_season_specific_exception_maps_season_relative(self):
+        from sickchill.oldbeard import db, name_cache
+
+        self.show.anime = 1
+        self.show.save_to_db()
+
+        # Map an alternate title to season 2 of the test show (indexer_id 1).
+        cache_db = db.DBConnection("cache.db")
+        cache_db.action(
+            "INSERT INTO scene_exceptions (indexer_id, show_name, season, custom) VALUES (?, ?, ?, ?)",
+            [1, "show name II", 2, 1],
+        )
+        name_cache.build_name_cache()
+
+        result = parser.NameParser().parse("[Group] show name II - 5 (BD 1920x1080 x265)")
+        self.assertEqual(result.show.indexerid, 1)
+        self.assertEqual(result.season_number, 2)
+        self.assertEqual(result.episode_numbers, [5])
+
+    def test_ambiguous_multi_season_exception_stays_series_absolute(self):
+        """If a title maps to MORE than one distinct season, it is ambiguous and must NOT be
+        treated as season-relative (which would naively pick the lowest season)."""
+        from sickchill.oldbeard import db, name_cache
+
+        self.show.anime = 1
+        self.show.save_to_db()
+
+        cache_db = db.DBConnection("cache.db")
+        cache_db.action(
+            "INSERT INTO scene_exceptions (indexer_id, show_name, season, custom) VALUES (?, ?, ?, ?)",
+            [1, "show name extra", 2, 1],
+        )
+        cache_db.action(
+            "INSERT INTO scene_exceptions (indexer_id, show_name, season, custom) VALUES (?, ?, ?, ?)",
+            [1, "show name extra", 3, 1],
+        )
+        name_cache.build_name_cache()
+
+        result = parser.NameParser().parse("[Group] show name extra - 5 (BD 1920x1080 x265)")
+        # Ambiguous -> falls back to series-absolute (no absolute data on the test show), so it
+        # must NOT have been season-relative-mapped to the lowest season (2).
+        self.assertNotEqual(result.season_number, 2)
+
+
 class ResolutionGuardTests(conftest.SickChillTestDBCase):
     """A screen resolution like 1920x1080 must not be parsed as season x episode.
 

@@ -261,6 +261,20 @@ class NameParser(object):
 
             elif best_result.show.is_anime and best_result.ab_episode_numbers:
                 best_result.scene_season = scene_exceptions.get_scene_exception_by_name(best_result.series_name)[1]
+
+                # Only treat the release as season-relative when the title maps UNAMBIGUOUSLY to a
+                # single specific season for THIS show. get_scene_exception_by_name() collapses
+                # multiple rows to the lowest season, so inspect all matches: if the resolved show
+                # has exactly one distinct non-(-1) season for this name, use it; if it spans
+                # several seasons (ambiguous) or only -1 (all seasons), stay series-absolute.
+                exception_seasons = {
+                    season
+                    for indexer_id, season in scene_exceptions.get_scene_exception_by_name_multiple(best_result.series_name)
+                    if indexer_id == best_result.show.indexerid and season is not None and season != -1
+                }
+                season_relative_season = exception_seasons.pop() if len(exception_seasons) == 1 else None
+
+                main_db_con = db.DBConnection()
                 for epAbsNo in best_result.ab_episode_numbers:
                     a = epAbsNo
 
@@ -269,11 +283,30 @@ class NameParser(object):
                             best_result.show.indexerid, best_result.show.indexer, epAbsNo, scene_season=best_result.scene_season
                         )
 
-                    (s, e) = helpers.get_all_episodes_from_absolute_number(best_result.show, [a])
+                    # When the title maps to a single specific season (e.g. "Mushoku Tensei II -
+                    # Isekai Ittara Honki Dasu" -> season 2), per-season releases like Moozzi2 BDs
+                    # number episodes within that season, so the parsed number is the season-relative
+                    # episode (S2E19), NOT a series-wide absolute number. Prefer that mapping when the
+                    # episode actually exists; otherwise fall back to series-absolute resolution.
+                    # (Verified directly against tv_episodes so we never create a placeholder episode
+                    # for a non-existent number.)
+                    season_relative = season_relative_season is not None and main_db_con.select_one(
+                        "SELECT 1 FROM tv_episodes WHERE showid = ? AND indexer = ? AND season = ? AND episode = ?",
+                        [best_result.show.indexerid, best_result.show.indexer, season_relative_season, a],
+                    )
 
-                    new_absolute_numbers.append(a)
-                    new_episode_numbers.extend(e)
-                    new_season_numbers.append(s)
+                    if season_relative:
+                        s, e = season_relative_season, a
+                        season_absolute = helpers.get_absolute_number_from_season_and_episode(best_result.show, s, e)
+                        if season_absolute:
+                            new_absolute_numbers.append(season_absolute)
+                        new_episode_numbers.append(e)
+                        new_season_numbers.append(s)
+                    else:
+                        (s, e) = helpers.get_all_episodes_from_absolute_number(best_result.show, [a])
+                        new_absolute_numbers.append(a)
+                        new_episode_numbers.extend(e)
+                        new_season_numbers.append(s)
 
             elif best_result.season_number and best_result.episode_numbers:
                 for epNo in best_result.episode_numbers:
