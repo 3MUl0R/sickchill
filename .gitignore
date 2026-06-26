@@ -92,6 +92,7 @@ contrib/nzbToMedia
 .eggs
 build
 .pytest_cache
+**/__pycache__/*
 
 # virtualenv #
 venv
@@ -117,3 +118,4 @@ poetry.lock
 
 # Codex review logs (local, not for VCS)
 .codex-reviews/
+.playwright-cli/*
