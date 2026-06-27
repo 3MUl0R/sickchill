@@ -79,9 +79,42 @@ def _load_prompt_template() -> str:
         raise
 
 
+def _load_alias_map() -> Dict[int, List[str]]:
+    """
+    Bulk-load every scene-exception alias as ``{indexer_id: [show_name, ...]}`` in a single query.
+
+    Deliberately does NOT call ``scene_exceptions.get_all_scene_exceptions()`` per show: that helper
+    re-queries cache.db AND rewrites the in-memory ``exceptions_cache`` on every call, so scoring the
+    whole library that way would be hundreds of queries plus cache churn on each AI fallback. This path
+    only runs on the (rare) post-process AI fallback, so one bulk read is both cheaper and side-effect
+    free. Returns ``{}`` on any error so candidate scoring degrades to show-name-only (prior behavior).
+    """
+    alias_map: Dict[int, List[str]] = {}
+    try:
+        from sickchill.oldbeard import db
+
+        cache_db = db.DBConnection("cache.db")
+        for row in cache_db.select("SELECT indexer_id, show_name FROM scene_exceptions"):
+            try:
+                indexer_id = int(row["indexer_id"])
+            except (TypeError, ValueError, KeyError):
+                continue
+            name = row["show_name"]
+            if name:
+                alias_map.setdefault(indexer_id, []).append(name)
+    except Exception as error:
+        logger.debug(f"Could not bulk-load scene exceptions for AI candidate scoring: {error}")
+    return alias_map
+
+
 def _get_candidate_shows(filename: str, folder_name: str, release_name: Optional[str] = None, limit: int = 25) -> List[Dict[str, Any]]:
     """
     Get candidate shows from the user's library based on fuzzy name matching.
+
+    The score for each show is the best of its English name and any of its scene-exception aliases, so a
+    show whose library (English) name does not resemble the release still surfaces when an alias (e.g. the
+    romaji title an anime was released under) does. This is essential for the AI fallback: otherwise the
+    correct show is dropped from the candidate list before the AI ever sees it.
 
     Args:
         filename: The filename to match against
@@ -92,7 +125,6 @@ def _get_candidate_shows(filename: str, folder_name: str, release_name: Optional
     Returns:
         List of candidate show dicts with indexer_id, name, and aliases
     """
-    candidates = []
     # Build search text including release_name if available
     search_parts = [folder_name, filename]
     if release_name:
@@ -102,51 +134,36 @@ def _get_candidate_shows(filename: str, folder_name: str, release_name: Optional
     # Get all shows from the user's library via settings.show_list
     all_shows = settings.show_list or []
 
-    # First pass: score by show name only (cheap operation)
-    preliminary_scores = []
+    # One bulk read of all scene-exception aliases (see _load_alias_map for why not per-show).
+    alias_map = _load_alias_map()
+
+    def _score(text: str) -> float:
+        text = text.lower()
+        ratio = SequenceMatcher(None, search_text, text).ratio()
+        # A show/alias name appearing verbatim in the release is a strong signal.
+        if text and text in search_text:
+            ratio = max(ratio, 0.7)
+        return ratio
+
+    scored = []
     for show in all_shows:
         if not show:
             continue
 
-        # Calculate similarity score against show name
-        show_name_lower = show.name.lower()
-        score = SequenceMatcher(None, search_text, show_name_lower).ratio()
+        score = _score(show.name)
 
-        # Also check if show name appears as substring (boosts common matches)
-        if show_name_lower in search_text:
-            score = max(score, 0.7)
+        # Dedup aliases (scene_exceptions can hold duplicates) while preserving order.
+        alias_names = list(dict.fromkeys(alias_map.get(show.indexerid, [])))
+        for alias_name in alias_names:
+            score = max(score, _score(alias_name))
 
-        preliminary_scores.append((show, score))
+        scored.append((score, show, alias_names))
 
-    # Sort by preliminary score and only check aliases for top candidates
-    # This optimizes the expensive scene_exceptions lookup
-    preliminary_scores.sort(key=lambda x: x[1], reverse=True)
-    top_candidates = preliminary_scores[: limit * 2]  # Check more to account for alias boosts
+    # Highest combined score first; return the top `limit`.
+    scored.sort(key=lambda item: item[0], reverse=True)
 
-    for show, base_score in top_candidates:
-        score = base_score
-        alias_names = []
-
-        # Only check scene exceptions for promising candidates
-        if score >= 0.3:
-            try:
-                from sickchill.oldbeard import scene_exceptions
-
-                exceptions = scene_exceptions.get_all_scene_exceptions(show.indexerid)
-                if exceptions:
-                    # exceptions is {season: [{"show_name": "...", "custom": True}, ...]}
-                    for season_exceptions in exceptions.values():
-                        for exc_dict in season_exceptions:
-                            if isinstance(exc_dict, dict) and "show_name" in exc_dict:
-                                alias_name = exc_dict["show_name"]
-                                alias_names.append(alias_name)
-                                # Check similarity against this alias
-                                alias_score = SequenceMatcher(None, search_text, alias_name.lower()).ratio()
-                                if alias_score > score:
-                                    score = alias_score
-            except Exception:
-                pass
-
+    candidates = []
+    for score, show, alias_names in scored[:limit]:
         candidates.append(
             {
                 "indexer_id": show.indexerid,
@@ -157,9 +174,7 @@ def _get_candidate_shows(filename: str, folder_name: str, release_name: Optional
             }
         )
 
-    # Sort by final score descending and return top candidates
-    candidates.sort(key=lambda x: x["score"], reverse=True)
-    return candidates[:limit]
+    return candidates
 
 
 def _format_candidates_for_prompt(candidates: List[Dict[str, Any]]) -> str:

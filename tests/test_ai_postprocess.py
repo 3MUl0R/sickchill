@@ -435,12 +435,12 @@ class TestGetCandidateShows(unittest.TestCase):
         """Clean up patches."""
         self.settings_patcher.stop()
 
-    @mock.patch("sickchill.oldbeard.scene_exceptions.get_all_scene_exceptions")
-    def test_returns_candidates_sorted_by_score(self, mock_get_exceptions):
+    @mock.patch("sickchill.oldbeard.ai.postprocess_matcher._load_alias_map")
+    def test_returns_candidates_sorted_by_score(self, mock_alias_map):
         """Test that candidates are returned sorted by similarity score."""
         from sickchill.oldbeard.ai.postprocess_matcher import _get_candidate_shows
 
-        mock_get_exceptions.return_value = {}
+        mock_alias_map.return_value = {}
 
         candidates = _get_candidate_shows("Breaking.Bad.S01E01.mkv", "Breaking Bad")
 
@@ -448,12 +448,12 @@ class TestGetCandidateShows(unittest.TestCase):
         # Breaking Bad should be first due to exact name match
         self.assertEqual(candidates[0]["name"], "Breaking Bad")
 
-    @mock.patch("sickchill.oldbeard.scene_exceptions.get_all_scene_exceptions")
-    def test_includes_release_name_in_matching(self, mock_get_exceptions):
+    @mock.patch("sickchill.oldbeard.ai.postprocess_matcher._load_alias_map")
+    def test_includes_release_name_in_matching(self, mock_alias_map):
         """Test that release_name is used for matching."""
         from sickchill.oldbeard.ai.postprocess_matcher import _get_candidate_shows
 
-        mock_get_exceptions.return_value = {}
+        mock_alias_map.return_value = {}
 
         candidates = _get_candidate_shows("some_file.mkv", "downloads", release_name="Game.of.Thrones.S05E10")
 
@@ -461,48 +461,110 @@ class TestGetCandidateShows(unittest.TestCase):
         got_found = any(c["name"] == "Game of Thrones" for c in candidates)
         self.assertTrue(got_found)
 
-    @mock.patch("sickchill.oldbeard.scene_exceptions.get_all_scene_exceptions")
-    def test_handles_scene_exceptions_correctly(self, mock_get_exceptions):
-        """Test that scene exceptions (aliases) are properly handled."""
+    @mock.patch("sickchill.oldbeard.ai.postprocess_matcher._load_alias_map")
+    def test_handles_scene_exceptions_correctly(self, mock_alias_map):
+        """Test that scene exceptions (aliases) are properly handled and surfaced in the candidate."""
         from sickchill.oldbeard.ai.postprocess_matcher import _get_candidate_shows
 
-        # Return scene exceptions in the correct dict format
-        mock_get_exceptions.return_value = {
-            -1: [{"show_name": "GoT", "custom": False}],  # -1 is "all seasons"
-            5: [{"show_name": "Game.of.Thrones", "custom": False}],
-        }
+        # Aliases keyed by indexer_id (the new bulk-loaded format).
+        mock_alias_map.return_value = {1002: ["GoT", "Game.of.Thrones"]}
 
-        # Use "Game" in search to get score >= 0.3 so scene exceptions are checked
         candidates = _get_candidate_shows("Game.S05E10.GoT.mkv", "Game of Thrones Season 5")
 
         # Find Game of Thrones candidate
         got_candidate = next((c for c in candidates if c["indexer_id"] == 1002), None)
         self.assertIsNotNone(got_candidate)
-        # Should have aliases from scene exceptions (score will be >= 0.3 from folder name)
+        # Should carry its aliases for the AI prompt.
         self.assertTrue(len(got_candidate["aliases"]) > 0)
 
-    @mock.patch("sickchill.oldbeard.scene_exceptions.get_all_scene_exceptions")
-    def test_returns_empty_when_no_shows(self, mock_get_exceptions):
+    @mock.patch("sickchill.oldbeard.ai.postprocess_matcher._load_alias_map")
+    def test_returns_empty_when_no_shows(self, mock_alias_map):
         """Test that empty list is returned when no shows in library."""
         from sickchill.oldbeard.ai.postprocess_matcher import _get_candidate_shows
 
         self.mock_settings.show_list = []
-        mock_get_exceptions.return_value = {}
+        mock_alias_map.return_value = {}
 
         candidates = _get_candidate_shows("some_file.mkv", "folder")
 
         self.assertEqual(candidates, [])
 
-    @mock.patch("sickchill.oldbeard.scene_exceptions.get_all_scene_exceptions")
-    def test_limits_candidates_to_specified_limit(self, mock_get_exceptions):
+    @mock.patch("sickchill.oldbeard.ai.postprocess_matcher._load_alias_map")
+    def test_limits_candidates_to_specified_limit(self, mock_alias_map):
         """Test that candidates are limited to the specified limit."""
         from sickchill.oldbeard.ai.postprocess_matcher import _get_candidate_shows
 
-        mock_get_exceptions.return_value = {}
+        mock_alias_map.return_value = {}
 
         candidates = _get_candidate_shows("file.mkv", "folder", limit=2)
 
         self.assertLessEqual(len(candidates), 2)
+
+    @mock.patch("sickchill.oldbeard.ai.postprocess_matcher._load_alias_map")
+    def test_alias_only_match_surfaces_show_with_unrelated_name(self, mock_alias_map):
+        """Core regression: a show whose English library name does NOT resemble the release, but whose
+        scene-exception alias (the romaji title) DOES, must still appear -- and rank at the top. Before
+        the fix the show was dropped from the candidate list before its aliases were ever consulted."""
+        from sickchill.oldbeard.ai.postprocess_matcher import _get_candidate_shows
+
+        romaji_show = MockTVShow(name="I'm Standing on a Million Lives", indexerid=2001, indexer=1)
+        self.mock_settings.show_list = [self.mock_show1, self.mock_show2, self.mock_show3, romaji_show]
+        mock_alias_map.return_value = {2001: ["100-man no Inochi no Ue ni Ore wa Tatte Iru"]}
+
+        candidates = _get_candidate_shows(
+            "100-man.no.Inochi.no.Ue.ni.Ore.wa.Tatte.Iru.E04.MULTi.1080p.WEB.x264-AMB3R.mkv",
+            "100-man no Inochi no Ue ni Ore wa Tatte Iru E04 MULTi 1080p WEB x264-AMB3R",
+        )
+        ids = [c["indexer_id"] for c in candidates]
+        self.assertIn(2001, ids)
+        self.assertEqual(candidates[0]["indexer_id"], 2001)
+
+    @mock.patch("sickchill.oldbeard.ai.postprocess_matcher._load_alias_map")
+    def test_alias_match_included_even_with_many_unrelated_shows(self, mock_alias_map):
+        """A target whose English name ranks far down among many shows is still returned when its alias
+        matches, because aliases are folded into the preliminary score (not gated behind a top-N
+        name-only pre-filter as before)."""
+        from sickchill.oldbeard.ai.postprocess_matcher import _get_candidate_shows
+
+        decoys = [MockTVShow(name=f"Decoy Show Title {i}", indexerid=3000 + i, indexer=1) for i in range(40)]
+        target = MockTVShow(name="Completely Unrelated English Title", indexerid=9999, indexer=1)
+        self.mock_settings.show_list = decoys + [target]
+        mock_alias_map.return_value = {9999: ["Zzz Romaji Alias Match"]}
+
+        candidates = _get_candidate_shows("Zzz.Romaji.Alias.Match.E01.mkv", "Zzz Romaji Alias Match E01", limit=5)
+
+        ids = [c["indexer_id"] for c in candidates]
+        self.assertIn(9999, ids)
+
+
+class TestLoadAliasMap(unittest.TestCase):
+    """Test the bulk scene-exception alias loader used by candidate scoring."""
+
+    def test_groups_rows_by_indexer_id_with_one_query(self):
+        from sickchill.oldbeard.ai import postprocess_matcher
+
+        rows = [
+            {"indexer_id": 1, "show_name": "Alpha"},
+            {"indexer_id": 1, "show_name": "Beta"},
+            {"indexer_id": 2, "show_name": "Gamma"},
+            {"indexer_id": "not-an-int", "show_name": "Skipped"},  # non-int id -> skipped
+            {"indexer_id": 3, "show_name": ""},  # empty name -> skipped
+        ]
+        fake_db = mock.MagicMock()
+        fake_db.select.return_value = rows
+
+        with mock.patch("sickchill.oldbeard.db.DBConnection", return_value=fake_db):
+            result = postprocess_matcher._load_alias_map()
+
+        self.assertEqual(result, {1: ["Alpha", "Beta"], 2: ["Gamma"]})
+        # One bulk query, not per-show.
+        fake_db.select.assert_called_once()
+
+    def test_returns_empty_on_error(self):
+        from sickchill.oldbeard.ai import postprocess_matcher
+
+        with mock.patch("sickchill.oldbeard.db.DBConnection", side_effect=Exception("db down")):
+            self.assertEqual(postprocess_matcher._load_alias_map(), {})
 
 
 class TestAnalyzeFile(unittest.TestCase):
