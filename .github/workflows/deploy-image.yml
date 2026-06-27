@@ -1,0 +1,159 @@
+# Build and publish the LinuxServer.io-based "thin" SickChill image (this fork's code + the [ai] extra)
+# to the GitHub Container Registry, for self-hosted (UnRAID) auto-deploy.
+#
+# Deploy model: a release is a `v*` git tag. On such a tag this workflow runs the test suite, builds the
+# image ONCE, verifies + boot-smoke-tests that exact image, then pushes the SAME image to GHCR (so the
+# tested bits are exactly what is published). A manual `workflow_dispatch` run builds + verifies +
+# smoke-tests but never pushes: the login/publish steps require a `push` event on a `v*` tag, so even a
+# manual dispatch aimed at a tag cannot publish or move `:latest`. Safe for pipeline testing.
+#
+# This is a fork-only workflow; it intentionally does not touch the upstream pythonpackage.yml/docker.yml.
+name: Deploy Image (GHCR)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-image-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: Test suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install Poetry
+        run: pipx install poetry
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "poetry"
+          cache-dependency-path: pyproject.toml
+      - name: Install sickchill (dev + ai extra)
+        run: poetry install --no-interaction --with dev --extras ai
+      - name: Run tests
+        run: poetry run poe pytest
+
+  build-and-push:
+    name: Build, verify, smoke-test, push (GHCR)
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=GPL-3.0-or-later
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Auth is only needed to push, which only happens on release tags.
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build ONCE and load into the local docker daemon (single-arch amd64). The exact image loaded
+      # here is what gets verified, smoke-tested, and (on a tag) pushed -- tested == published.
+      - name: Build image (load, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/lsio.Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify image is this fork + [ai]
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          IMAGE="$(echo "$IMAGE_TAGS" | head -n1)"
+          echo "Verifying image: $IMAGE"
+          docker run --rm --entrypoint /lsiopy/bin/python "$IMAGE" -c "import sickchill, anthropic; print('imports OK:', sickchill.__file__, 'anthropic', anthropic.__version__)"
+          docker run --rm --entrypoint /lsiopy/bin/pip "$IMAGE" show sickchill anthropic
+          docker run --rm --entrypoint /lsiopy/bin/python "$IMAGE" -c "import sickchill, pathlib; p = pathlib.Path(sickchill.__file__).parent / 'oldbeard/name_parser/parser.py'; assert 'extract_explicit_anime_season' in p.read_text(), 'fork marker missing'; print('FORK_CODE_OK')"
+          echo "--- pip check (informational, non-gating) ---"
+          docker run --rm --entrypoint /lsiopy/bin/pip "$IMAGE" check || echo "pip check reported issues (informational)"
+
+      - name: Boot smoke test
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          IMAGE="$(echo "$IMAGE_TAGS" | head -n1)"
+          TMPCFG="$(mktemp -d)"
+          CID=""
+          cleanup() {
+            if [ -n "$CID" ]; then
+              echo "--- container logs (tail) ---"
+              docker logs "$CID" 2>&1 | tail -60 || true
+              docker rm -f "$CID" >/dev/null 2>&1 || true
+            fi
+            rm -rf "$TMPCFG"
+          }
+          trap cleanup EXIT
+          CID="$(docker run -d -p 18081:8081 -e PUID=99 -e PGID=100 -e TZ=Etc/UTC -v "$TMPCFG":/config "$IMAGE")"
+          echo "Started $CID; polling http://localhost:18081/ui/get_messages ..."
+          for i in $(seq 1 18); do
+            if curl -fsS -o /dev/null "http://localhost:18081/ui/get_messages"; then
+              echo "Web UI is up after ~$((i * 10))s"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Web UI did not come up within 180s"
+          exit 1
+
+      # Publish the exact loaded+tested image. Guarded to push events on v* tags: no manual/branch push.
+      - name: Push image to GHCR (release tags only)
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          echo "$IMAGE_TAGS" | while read -r tag; do
+            [ -n "$tag" ] || continue
+            echo "Pushing $tag"
+            docker push "$tag"
+          done
