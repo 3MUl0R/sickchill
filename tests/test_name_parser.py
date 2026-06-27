@@ -883,6 +883,94 @@ class ExplicitAnimeSeasonTests(conftest.ResetNameCacheMixin, conftest.SickChillT
         self.assertEqual(result.episode_numbers, [3])  # raw 3, not the scene-converted absolute 17
 
 
+class SeasonlessAnimeAbsoluteTests(conftest.ResetNameCacheMixin, conftest.SickChillTestPostProcessorCase):
+    """An anime release that parsed an episode number but NO season (e.g. the E-prefixed
+    'Show.Name.E04.quality-group' form, which a NORMAL regex claims as ep_num with no season) must be
+    treated as a series-wide ABSOLUTE number. Before the fix such results kept season=None, matched no
+    conversion branch, and could not be filed (they only reached the AI fallback)."""
+
+    def _make_anime(self):
+        self.show.anime = 1
+        self.show.save_to_db()
+
+    def test_e_prefixed_seasonless_number_resolves_as_absolute(self):
+        from sickchill.oldbeard import db, name_cache
+
+        self._make_anime()
+        # Give S1E4 a known series-absolute number so absolute 4 -> S1E4.
+        main_db = db.DBConnection()
+        main_db.action("UPDATE tv_episodes SET absolute_number = 4 WHERE showid = 1 AND indexer = 1 AND season = 1 AND episode = 4")
+        name_cache.build_name_cache()
+
+        result = parser.NameParser().parse("show name E04 MULTi 1080p WEB x264-AMB3R")
+        self.assertEqual(result.show.indexerid, 1)
+        self.assertEqual(result.season_number, 1)
+        self.assertEqual(result.episode_numbers, [4])
+
+    def test_season_zero_specials_not_reinterpreted(self):
+        """Anime S00E01 (specials) must be left as season 0 episode 1 -- the new branch is gated on
+        ``season_number is None``, NOT a falsy check, so season 0 does not get reinterpreted as absolute."""
+        from sickchill.oldbeard import name_cache
+
+        self._make_anime()
+        name_cache.build_name_cache()
+
+        result = parser.NameParser().parse("show name S00E01 MULTi 1080p WEB x264-AMB3R")
+        self.assertEqual(result.show.indexerid, 1)
+        self.assertEqual(result.season_number, 0)
+        self.assertEqual(result.episode_numbers, [1])
+
+    def test_nonexistent_absolute_stays_unmatched(self):
+        """A season-less number with no matching absolute episode must stay unmatched (season None) and
+        must NOT fabricate a season/episode -- status quo is to fall through to the AI fallback."""
+        from sickchill.oldbeard import name_cache
+
+        self._make_anime()
+        name_cache.build_name_cache()
+
+        # No episode has absolute_number 99 on the test show.
+        result = parser.NameParser().parse("show name E99 MULTi 1080p WEB x264-AMB3R")
+        self.assertEqual(result.show.indexerid, 1)
+        self.assertIsNone(result.season_number)
+
+    def test_season_specific_alias_with_e_prefix_maps_season_relative(self):
+        """The shared anime-absolute helper means the season-relative logic applies to the E-prefixed
+        form too: a title whose alias pins season 2 maps 'Show II E05' -> S2E5 (not series-absolute)."""
+        from sickchill.oldbeard import db, name_cache
+
+        self._make_anime()
+        cache_db = db.DBConnection("cache.db")
+        cache_db.action(
+            "INSERT INTO scene_exceptions (indexer_id, show_name, season, custom) VALUES (?, ?, ?, ?)",
+            [1, "show name II", 2, 1],
+        )
+        name_cache.build_name_cache()
+
+        result = parser.NameParser().parse("show name II E05 MULTi 1080p WEB x264-AMB3R")
+        self.assertEqual(result.show.indexerid, 1)
+        self.assertEqual(result.season_number, 2)
+        self.assertEqual(result.episode_numbers, [5])
+
+    def test_non_anime_seasonless_number_left_unmatched(self):
+        """The new branch is gated on is_anime: a NON-anime show's season-less E04 must NOT be
+        reinterpreted as a series-absolute number (behavior unchanged -- season stays None)."""
+        from sickchill.oldbeard import db, name_cache
+
+        # Explicitly mark the show NON-anime (the test DB row can carry anime=1 from a sibling test,
+        # since the harness reuses the same indexer_id across tests). Set an absolute_number to prove it
+        # is not consulted for a non-anime show. Use a release string no other test parses, because the
+        # process-global name_parser_cache is keyed by name and would otherwise return a sibling's result.
+        self.show.anime = 0
+        self.show.save_to_db()
+        main_db = db.DBConnection()
+        main_db.action("UPDATE tv_episodes SET absolute_number = 7 WHERE showid = 1 AND indexer = 1 AND season = 1 AND episode = 7")
+        name_cache.build_name_cache()
+
+        result = parser.NameParser().parse("show name E07 MULTi 1080p WEB x264-AMB3R")
+        self.assertEqual(result.show.indexerid, 1)
+        self.assertIsNone(result.season_number)
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         SUITE = unittest.TestLoader().loadTestsFromName("name_parser_tests.BasicTests.test_" + sys.argv[1])

@@ -300,77 +300,22 @@ class NameParser(object):
                     new_season_numbers.append(s)
 
             elif best_result.show.is_anime and best_result.ab_episode_numbers:
-                best_result.scene_season = scene_exceptions.get_scene_exception_by_name(best_result.series_name)[1]
+                self._resolve_anime_absolute(
+                    best_result, best_result.ab_episode_numbers, new_season_numbers, new_episode_numbers, new_absolute_numbers, skip_scene_detection
+                )
 
-                # Only treat the release as season-relative when the title maps UNAMBIGUOUSLY to a
-                # single specific season for THIS show. get_scene_exception_by_name() collapses
-                # multiple rows to the lowest season, so inspect all matches: if the resolved show
-                # has exactly one distinct non-(-1) season for this name, use it; if it spans
-                # several seasons (ambiguous) or only -1 (all seasons), stay series-absolute.
-                exception_seasons = {
-                    season
-                    for indexer_id, season in scene_exceptions.get_scene_exception_by_name_multiple(best_result.series_name)
-                    if indexer_id == best_result.show.indexerid and season is not None and season != -1
-                }
-                season_relative_season = exception_seasons.pop() if len(exception_seasons) == 1 else None
-
-                # A1: no scene exception pinned a season, but the title carries a CONFIDENT explicit
-                # season token (search-time "K-ON S2 - 01" whose ".S2." was swallowed into the series
-                # name and does NOT match the "K-On!! S2" exception). Treat that token as the season --
-                # the same season the double-bang PP filename already gets via its exception -- so
-                # search maps it to the right season instead of the series-absolute season 1. Gated
-                # hard: only when stripping the token STILL resolves to THIS show (so a number that is
-                # genuinely part of the title is not mistaken for a season). This only supplies
-                # season_relative_season; the per-epAbsNo EXISTS check below (Fix B, using the RAW
-                # epAbsNo) still validates (season, episode) and falls back to series-absolute when it
-                # does not exist -- A1 adds no new numbering of its own.
-                if season_relative_season is None:
-                    explicit_season = extract_explicit_anime_season(best_result.series_name)
-                    if explicit_season is not None:
-                        stripped_name = strip_explicit_anime_season(best_result.series_name)
-                        stripped_show = helpers.get_show(stripped_name, False) if stripped_name else None
-                        if stripped_show and stripped_show.indexerid == best_result.show.indexerid:
-                            season_relative_season = explicit_season
-
-                main_db_con = db.DBConnection()
-                for epAbsNo in best_result.ab_episode_numbers:
-                    a = epAbsNo
-
-                    if best_result.show.is_scene and not skip_scene_detection:
-                        a = scene_numbering.get_indexer_absolute_numbering(
-                            best_result.show.indexerid, best_result.show.indexer, epAbsNo, scene_season=best_result.scene_season
-                        )
-
-                    # When the title maps to a single specific season (e.g. "Mushoku Tensei II -
-                    # Isekai Ittara Honki Dasu" -> season 2), per-season releases like Moozzi2 BDs
-                    # number episodes within that season, so the parsed number is the season-relative
-                    # episode (S2E19), NOT a series-wide absolute number. Prefer that mapping when the
-                    # episode actually exists; otherwise fall back to series-absolute resolution.
-                    # (Verified directly against tv_episodes so we never create a placeholder episode
-                    # for a non-existent number.)
-                    # For a SCENE show, `a` was converted above into a series-wide ABSOLUTE number;
-                    # the season-relative interpretation must use the RAW parsed number (epAbsNo) as
-                    # the within-season episode. Using the scene-converted `a` here is a bug: e.g. for
-                    # K-ON "S2 - 01", epAbsNo=1 -> a=15 (indexer absolute), and since S2E15 exists the
-                    # check would wrongly map it to S2E15. The scene-converted `a` is only valid for
-                    # the series-absolute fallback below.
-                    season_relative = season_relative_season is not None and main_db_con.select_one(
-                        "SELECT 1 FROM tv_episodes WHERE showid = ? AND indexer = ? AND season = ? AND episode = ?",
-                        [best_result.show.indexerid, best_result.show.indexer, season_relative_season, epAbsNo],
-                    )
-
-                    if season_relative:
-                        s, e = season_relative_season, epAbsNo
-                        season_absolute = helpers.get_absolute_number_from_season_and_episode(best_result.show, s, e)
-                        if season_absolute:
-                            new_absolute_numbers.append(season_absolute)
-                        new_episode_numbers.append(e)
-                        new_season_numbers.append(s)
-                    else:
-                        (s, e) = helpers.get_all_episodes_from_absolute_number(best_result.show, [a])
-                        new_absolute_numbers.append(a)
-                        new_episode_numbers.extend(e)
-                        new_season_numbers.append(s)
+            elif best_result.show.is_anime and best_result.episode_numbers and best_result.season_number is None:
+                # A season-less episode number on an anime release is a series-wide ABSOLUTE number. This
+                # happens when a NORMAL regex (e.g. "Show.Name.E04.quality" via no_season_general) claims the
+                # number as ep_num with no season instead of an anime regex's ep_ab_num. Without this branch
+                # such a result kept season=None, matched none of the conversion branches, and could not be
+                # filed (it fell through to the AI fallback). Route the parsed episode numbers through the
+                # SAME anime-absolute resolution as ab_episode_numbers so scene-season / explicit-season (A1)
+                # / season-relative handling all apply. Gated on `season_number is None` (NOT a falsy check)
+                # so anime season-0 specials like S00E01 are left untouched.
+                self._resolve_anime_absolute(
+                    best_result, best_result.episode_numbers, new_season_numbers, new_episode_numbers, new_absolute_numbers, skip_scene_detection
+                )
 
             elif best_result.season_number and best_result.episode_numbers:
                 for epNo in best_result.episode_numbers:
@@ -417,6 +362,85 @@ class NameParser(object):
         time.sleep(0.02)
 
         return best_result
+
+    def _resolve_anime_absolute(self, best_result, numbers, new_season_numbers, new_episode_numbers, new_absolute_numbers, skip_scene_detection):
+        """Resolve a list of anime numbers (series-wide absolute, or season-less episode numbers treated as
+        such) into season/episode/absolute numbers, appending to the passed-in lists.
+
+        Shared by the ``ab_episode_numbers`` branch and the season-less ``episode_numbers`` branch so both get
+        the same scene-season / explicit-season (A1) / season-relative handling.
+        """
+        best_result.scene_season = scene_exceptions.get_scene_exception_by_name(best_result.series_name)[1]
+
+        # Only treat the release as season-relative when the title maps UNAMBIGUOUSLY to a
+        # single specific season for THIS show. get_scene_exception_by_name() collapses
+        # multiple rows to the lowest season, so inspect all matches: if the resolved show
+        # has exactly one distinct non-(-1) season for this name, use it; if it spans
+        # several seasons (ambiguous) or only -1 (all seasons), stay series-absolute.
+        exception_seasons = {
+            season
+            for indexer_id, season in scene_exceptions.get_scene_exception_by_name_multiple(best_result.series_name)
+            if indexer_id == best_result.show.indexerid and season is not None and season != -1
+        }
+        season_relative_season = exception_seasons.pop() if len(exception_seasons) == 1 else None
+
+        # A1: no scene exception pinned a season, but the title carries a CONFIDENT explicit
+        # season token (search-time "K-ON S2 - 01" whose ".S2." was swallowed into the series
+        # name and does NOT match the "K-On!! S2" exception). Treat that token as the season --
+        # the same season the double-bang PP filename already gets via its exception -- so
+        # search maps it to the right season instead of the series-absolute season 1. Gated
+        # hard: only when stripping the token STILL resolves to THIS show (so a number that is
+        # genuinely part of the title is not mistaken for a season). This only supplies
+        # season_relative_season; the per-epAbsNo EXISTS check below (Fix B, using the RAW
+        # epAbsNo) still validates (season, episode) and falls back to series-absolute when it
+        # does not exist -- A1 adds no new numbering of its own.
+        if season_relative_season is None:
+            explicit_season = extract_explicit_anime_season(best_result.series_name)
+            if explicit_season is not None:
+                stripped_name = strip_explicit_anime_season(best_result.series_name)
+                stripped_show = helpers.get_show(stripped_name, False) if stripped_name else None
+                if stripped_show and stripped_show.indexerid == best_result.show.indexerid:
+                    season_relative_season = explicit_season
+
+        main_db_con = db.DBConnection()
+        for epAbsNo in numbers:
+            a = epAbsNo
+
+            if best_result.show.is_scene and not skip_scene_detection:
+                a = scene_numbering.get_indexer_absolute_numbering(
+                    best_result.show.indexerid, best_result.show.indexer, epAbsNo, scene_season=best_result.scene_season
+                )
+
+            # When the title maps to a single specific season (e.g. "Mushoku Tensei II -
+            # Isekai Ittara Honki Dasu" -> season 2), per-season releases like Moozzi2 BDs
+            # number episodes within that season, so the parsed number is the season-relative
+            # episode (S2E19), NOT a series-wide absolute number. Prefer that mapping when the
+            # episode actually exists; otherwise fall back to series-absolute resolution.
+            # (Verified directly against tv_episodes so we never create a placeholder episode
+            # for a non-existent number.)
+            # For a SCENE show, `a` was converted above into a series-wide ABSOLUTE number;
+            # the season-relative interpretation must use the RAW parsed number (epAbsNo) as
+            # the within-season episode. Using the scene-converted `a` here is a bug: e.g. for
+            # K-ON "S2 - 01", epAbsNo=1 -> a=15 (indexer absolute), and since S2E15 exists the
+            # check would wrongly map it to S2E15. The scene-converted `a` is only valid for
+            # the series-absolute fallback below.
+            season_relative = season_relative_season is not None and main_db_con.select_one(
+                "SELECT 1 FROM tv_episodes WHERE showid = ? AND indexer = ? AND season = ? AND episode = ?",
+                [best_result.show.indexerid, best_result.show.indexer, season_relative_season, epAbsNo],
+            )
+
+            if season_relative:
+                s, e = season_relative_season, epAbsNo
+                season_absolute = helpers.get_absolute_number_from_season_and_episode(best_result.show, s, e)
+                if season_absolute:
+                    new_absolute_numbers.append(season_absolute)
+                new_episode_numbers.append(e)
+                new_season_numbers.append(s)
+            else:
+                (s, e) = helpers.get_all_episodes_from_absolute_number(best_result.show, [a])
+                new_absolute_numbers.append(a)
+                new_episode_numbers.extend(e)
+                new_season_numbers.append(s)
 
     def check_anime_preferred(self, best_result, matches):
         show = self.show_object or best_result.show
