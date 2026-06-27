@@ -258,7 +258,7 @@ class CrossSeasonMismatchTests(unittest.TestCase):
         self.assertFalse(self.mismatch("Show.S2-05.1080p", parse_result, episodes))
 
 
-class CacheCrossSeasonGuardTests(conftest.SickChillTestPostProcessorCase):
+class CacheCrossSeasonGuardTests(conftest.ResetNameCacheMixin, conftest.SickChillTestPostProcessorCase):
     """The cache-read guard must drop a cached anime result whose release name confidently names a
     different season than the row it's filed under (covers RSS- and search-populated cache that the
     fresh-search guard cannot see)."""
@@ -310,7 +310,7 @@ class CacheCrossSeasonGuardTests(conftest.SickChillTestPostProcessorCase):
         self.assertTrue(needed.get(self.episode))
 
 
-class A1CacheIntegrationTests(conftest.SickChillTestPostProcessorCase):
+class A1CacheIntegrationTests(conftest.ResetNameCacheMixin, conftest.SickChillTestPostProcessorCase):
     """A1 + A2 compose at the cache layer: an explicit-season anime release parses to the correct
     season when cached (so it is filed under S2, not the series-absolute S1), and is then returned for
     the wanted S2 episode without the A2 cross-season guard rejecting it."""

@@ -29,7 +29,7 @@ import sickchill.logger
 import sickchill.oldbeard.tvcache
 import sickchill.start
 from sickchill import settings
-from sickchill.oldbeard import db, providers
+from sickchill.oldbeard import db, name_cache, providers
 from sickchill.oldbeard.databases import cache, failed, main
 from sickchill.show.indexers import ShowIndexer
 from sickchill.tv import TVEpisode, TVShow
@@ -211,6 +211,20 @@ class SickChillTestPostProcessorCase(unittest.TestCase):
         teardown_test_episode_file()
         teardown_test_show_dir()
         teardown_test_processing_dir()
+
+
+class ResetNameCacheMixin:
+    """Opt-in mixin: clear the process-global ``name_cache`` on teardown.
+
+    Tests that seed scene exceptions / aliases and call ``build_name_cache()`` populate the in-memory
+    ``name_cache`` module global, which the test DB teardown does not reset and so leaks into later,
+    unrelated tests (notably the post-processor tests' show resolution). Mix this in BEFORE the test
+    base class so its ``tearDown`` runs first, then chains to ``super().tearDown()``.
+    """
+
+    def tearDown(self):
+        name_cache.name_cache.clear()
+        super().tearDown()
 
 
 class TestDBConnection(db.DBConnection, object):

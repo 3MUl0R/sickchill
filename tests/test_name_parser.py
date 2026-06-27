@@ -631,7 +631,7 @@ class BasicFailedTests(conftest.SickChillTestDBCase):
         self._test_names(name_parser, "scene_date_format", lambda x: x + ".avi")
 
 
-class SeasonRelativeAnimeTests(conftest.SickChillTestPostProcessorCase):
+class SeasonRelativeAnimeTests(conftest.ResetNameCacheMixin, conftest.SickChillTestPostProcessorCase):
     """A per-season anime release (Moozzi2-style) whose title matches a scene exception mapped to a
     specific season must resolve season-relative (e.g. 'Show II - 5' -> S2E5), not as a series-wide
     absolute number (which would land in season 1)."""
@@ -710,7 +710,7 @@ class ResolutionGuardTests(conftest.SickChillTestDBCase):
         self.assertEqual(result.episode_numbers, [5])
 
 
-class SceneAnimeSeasonRelativeTests(conftest.SickChillTestPostProcessorCase):
+class SceneAnimeSeasonRelativeTests(conftest.ResetNameCacheMixin, conftest.SickChillTestPostProcessorCase):
     """Regression for the within-season mis-numbering bug (Fix B).
 
     For a SCENE-numbered anime, the absolute number is run through scene->indexer conversion, so the
@@ -772,7 +772,7 @@ class SceneAnimeSeasonRelativeTests(conftest.SickChillTestPostProcessorCase):
         self.assertEqual(result.episode_numbers, [1])
 
 
-class ExplicitAnimeSeasonTests(conftest.SickChillTestPostProcessorCase):
+class ExplicitAnimeSeasonTests(conftest.ResetNameCacheMixin, conftest.SickChillTestPostProcessorCase):
     """A1: a confident explicit season token in an anime release name (e.g. the search-time
     "K-ON.S2-01" whose ".S2." is swallowed into the series name and does NOT match a scene exception)
     is read as the season, so the release maps season-relative (S2E01) instead of to the
