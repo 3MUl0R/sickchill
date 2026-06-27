@@ -480,6 +480,16 @@ class TVCache(RSSTorrentMixin):
 
             episode_object = show_obj.get_episode(cur_season, cur_ep)
 
+            # A2 cross-season guard (cache layer): a cached anime result whose release name confidently
+            # names a different season than the one it is filed under must not be returned. Covers both
+            # RSS- and search-populated cache entries, which the fresh-search guard cannot see (e.g.
+            # "K-ON.S2-01" parsed/stored as S1E01 would otherwise be snatched from cache for S1).
+            if show_obj.is_anime and self.provider._release_season_conflicts(
+                cur_result["name"], {cur_season, getattr(episode_object, "scene_season", None)}
+            ):
+                logger.debug("Ignoring cached result {0}: it names a different season than it is filed under".format(cur_result["name"]))
+                continue
+
             # build a result object
             title = cur_result["name"]
             url = cur_result["url"]

@@ -290,13 +290,19 @@ class NameParser(object):
                     # episode actually exists; otherwise fall back to series-absolute resolution.
                     # (Verified directly against tv_episodes so we never create a placeholder episode
                     # for a non-existent number.)
+                    # For a SCENE show, `a` was converted above into a series-wide ABSOLUTE number;
+                    # the season-relative interpretation must use the RAW parsed number (epAbsNo) as
+                    # the within-season episode. Using the scene-converted `a` here is a bug: e.g. for
+                    # K-ON "S2 - 01", epAbsNo=1 -> a=15 (indexer absolute), and since S2E15 exists the
+                    # check would wrongly map it to S2E15. The scene-converted `a` is only valid for
+                    # the series-absolute fallback below.
                     season_relative = season_relative_season is not None and main_db_con.select_one(
                         "SELECT 1 FROM tv_episodes WHERE showid = ? AND indexer = ? AND season = ? AND episode = ?",
-                        [best_result.show.indexerid, best_result.show.indexer, season_relative_season, a],
+                        [best_result.show.indexerid, best_result.show.indexer, season_relative_season, epAbsNo],
                     )
 
                     if season_relative:
-                        s, e = season_relative_season, a
+                        s, e = season_relative_season, epAbsNo
                         season_absolute = helpers.get_absolute_number_from_season_and_episode(best_result.show, s, e)
                         if season_absolute:
                             new_absolute_numbers.append(season_absolute)

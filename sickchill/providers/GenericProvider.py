@@ -284,6 +284,15 @@ class GenericProvider(object):
                         actual_season = int(sql_results[0]["season"])
                         actual_episodes = [int(sql_results[0]["episode"])]
 
+            # A2 cross-season guard: reject an anime result whose release name confidently names a
+            # different season than the one we matched it to (e.g. "K-ON.S2-01", which the parser
+            # resolves to S1E01 via the absolute-number collision, must not be snatched for the wanted
+            # Season 1 episode). Reject-only; never re-files; leaves non-anime / untokened results
+            # untouched.
+            if not skip_release and show.is_anime and actual_episodes and self._is_cross_season_mismatch(title, parse_result, episodes):
+                logger.info(_("Ignoring result {title}: its release name names a different season than the episode it matched.").format(title=title))
+                skip_release = True
+
             logger.debug(f"Adding item from search to cache: {title}")
 
             cache_item = self.cache.add_cache_entry(title, url, size, seeders, leechers, parse_result=parse_result)
@@ -349,6 +358,66 @@ class GenericProvider(object):
             )
 
         return results
+
+    @staticmethod
+    def _explicit_anime_season(title):
+        """
+        Return a CONFIDENTLY-detected explicit season number from an anime release name, else None.
+
+        Confident tokens only: ``S2`` / ``S02`` / ``Season 2`` (optionally space/dot/underscore
+        separated). Deliberately does NOT treat as a season: a full ``SxxExx`` episode code, Roman
+        numerals (``II``/``III`` — left to the parser's scene-exception handling), or a bare trailing
+        number. Bracketed/parenthesized tags (release group, codec, resolution) are stripped first so
+        a group like ``[S2Productions]`` is not mistaken for a season marker.
+        """
+        if not title:
+            return None
+        core = re.sub(r"[\[(][^\])]*[\])]", " ", title)
+        # S<n> / S0<n> / Season <n> as a STANDALONE token: must not be preceded by an alnum and must
+        # not be followed by an alnum. The trailing boundary rejects SxxExx codes (S02E03) and stray
+        # tags like "S2Productions" / "S2x264".
+        match = re.search(r"(?<![A-Za-z0-9])S(?:eason)?[ ._]?(\d{1,2})(?![A-Za-z0-9])", core, re.IGNORECASE)
+        return int(match.group(1)) if match else None
+
+    @staticmethod
+    def _release_season_conflicts(title, allowed_seasons):
+        """
+        True if the release name confidently names an explicit season that is NOT among
+        ``allowed_seasons``. Shared by the fresh-search guard and the cache-read guard so both paths
+        apply the same reject-only cross-season check. Returns False when no confident token exists.
+        """
+        release_season = GenericProvider._explicit_anime_season(title)
+        return release_season is not None and release_season not in allowed_seasons
+
+    @staticmethod
+    def _is_cross_season_mismatch(title, parse_result, episodes):
+        """
+        True when an anime result's release name confidently encodes a season DIFFERENT from the
+        season(s) of the wanted episodes it matched. Used to reject cross-season anime snatches.
+
+        Returns False when there is no confident explicit season token (so normal absolute-numbered
+        and untokened releases are unaffected) or when the named season is among the matched
+        episodes' seasons (TVDB or scene).
+        """
+        if GenericProvider._explicit_anime_season(title) is None:
+            return False
+
+        matched_eps = [
+            ep
+            for ep in episodes
+            if (
+                parse_result.season_number is not None
+                and ep.season == parse_result.season_number
+                and ep.episode in (parse_result.episode_numbers or [])
+            )
+            or (getattr(ep.show, "is_anime", False) and ep.absolute_number in (parse_result.ab_episode_numbers or []))
+        ]
+        if not matched_eps:
+            return False
+
+        allowed_seasons = {ep.season for ep in matched_eps}
+        allowed_seasons |= {ep.scene_season for ep in matched_eps if getattr(ep, "scene_season", None) is not None}
+        return GenericProvider._release_season_conflicts(title, allowed_seasons)
 
     def _apply_ai_search_matches(self, show, episodes, unmatched_items, results, manual_search, download_current_quality, search_mode, is_failed_retry=False):
         """

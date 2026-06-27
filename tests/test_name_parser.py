@@ -710,6 +710,68 @@ class ResolutionGuardTests(conftest.SickChillTestDBCase):
         self.assertEqual(result.episode_numbers, [5])
 
 
+class SceneAnimeSeasonRelativeTests(conftest.SickChillTestPostProcessorCase):
+    """Regression for the within-season mis-numbering bug (Fix B).
+
+    For a SCENE-numbered anime, the absolute number is run through scene->indexer conversion, so the
+    parsed release number ``epAbsNo`` and the converted value ``a`` differ. The season-relative
+    interpretation must use the RAW ``epAbsNo`` as the within-season episode. The old code used the
+    scene-converted ``a``: e.g. "Show II - 5" -> a=15 and, because S2E15 existed, it wrongly mapped to
+    S2E15. (This is exactly how the K-ON S2 BD scattered across S2E13-E26.)
+    """
+
+    def _seed_scene_absolute(self, scene_absolute_number, scene_season, absolute_number, season, episode):
+        from sickchill.oldbeard import db
+
+        main_db = db.DBConnection()
+        main_db.action(
+            "INSERT OR REPLACE INTO scene_numbering "
+            "(indexer, indexer_id, season, episode, absolute_number, scene_season, scene_episode, scene_absolute_number) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [1, 1, season, episode, absolute_number, scene_season, episode, scene_absolute_number],
+        )
+
+    def _make_scene_anime_with_season2_exception(self):
+        from sickchill.oldbeard import db, name_cache
+
+        self.show.anime = 1
+        self.show.scene = 1
+        self.show.save_to_db()
+
+        cache_db = db.DBConnection("cache.db")
+        cache_db.action(
+            "INSERT INTO scene_exceptions (indexer_id, show_name, season, custom) VALUES (?, ?, ?, ?)",
+            [1, "show name II", 2, 1],
+        )
+        name_cache.build_name_cache()
+
+    def test_scene_season_relative_uses_raw_episode_not_converted_absolute(self):
+        self._make_scene_anime_with_season2_exception()
+        # scene-absolute 5 in season 2 converts to indexer absolute 15; S2E15 exists on the test show,
+        # which is what made the old code mis-map "show name II - 5" to S2E15.
+        self._seed_scene_absolute(scene_absolute_number=5, scene_season=2, absolute_number=15, season=2, episode=5)
+
+        result = parser.NameParser().parse("[Group] show name II - 5 (BD 1920x1080 x265)")
+        self.assertEqual(result.show.indexerid, 1)
+        self.assertEqual(result.season_number, 2)
+        self.assertEqual(result.episode_numbers, [5])  # must be E5 (raw), not E15 (scene-converted absolute)
+
+    def test_scene_nonexistent_season_relative_falls_back_to_absolute(self):
+        """When the raw number is NOT a valid episode in the mapped season, fall back to series-absolute."""
+        from sickchill.oldbeard import db
+
+        self._make_scene_anime_with_season2_exception()
+        # Give S3E1 a known series-absolute number, and an identity scene mapping for that number.
+        main_db = db.DBConnection()
+        main_db.action("UPDATE tv_episodes SET absolute_number = 38 WHERE showid = 1 AND indexer = 1 AND season = 3 AND episode = 1")
+        self._seed_scene_absolute(scene_absolute_number=38, scene_season=2, absolute_number=38, season=3, episode=1)
+
+        # S2 has no episode 38, so the season-relative branch must not fire; absolute 38 -> S3E1.
+        result = parser.NameParser().parse("[Group] show name II - 38 (BD 1920x1080 x265)")
+        self.assertEqual(result.season_number, 3)
+        self.assertEqual(result.episode_numbers, [1])
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         SUITE = unittest.TestLoader().loadTestsFromName("name_parser_tests.BasicTests.test_" + sys.argv[1])
