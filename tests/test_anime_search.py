@@ -203,6 +203,23 @@ class ExplicitAnimeSeasonDetectorTests(unittest.TestCase):
         self.assertIsNone(self.detect(""))
         self.assertIsNone(self.detect(None))
 
+    def test_provider_detector_delegates_to_shared_parser_function(self):
+        # A1 extracted the detector to the name parser; the provider staticmethod must be a pure
+        # delegate so the search/cache guards (A2) and the parser (A1) stay in lockstep.
+        from sickchill.oldbeard.name_parser.parser import extract_explicit_anime_season
+
+        for name in [
+            "[Moozzi2].K-ON.S2-01.[BD.1920x1080.x.264.FLACx3]",
+            "Show Name Season 3 - 04",
+            "Show.S03.1080p.BluRay",
+            "Mushoku.Tensei.Jobless.Reincarnation.S02E03.1080p.WEBRip",
+            "[S2Productions] Some Show - 05 [1080p]",
+            "[Judas] Bleach - 206 [1080p]",
+            "",
+            None,
+        ]:
+            self.assertEqual(self.detect(name), extract_explicit_anime_season(name))
+
 
 class CrossSeasonMismatchTests(unittest.TestCase):
     """GenericProvider._is_cross_season_mismatch (Fix A2 guard): reject-only cross-season detection."""
@@ -291,6 +308,72 @@ class CacheCrossSeasonGuardTests(conftest.SickChillTestPostProcessorCase):
         self._cache_row("[Judas] show name - 1 [1080p]")
         needed = self.provider.cache.find_needed_episodes(self.episode)
         self.assertTrue(needed.get(self.episode))
+
+
+class A1CacheIntegrationTests(conftest.SickChillTestPostProcessorCase):
+    """A1 + A2 compose at the cache layer: an explicit-season anime release parses to the correct
+    season when cached (so it is filed under S2, not the series-absolute S1), and is then returned for
+    the wanted S2 episode without the A2 cross-season guard rejecting it."""
+
+    _COLUMNS = CacheCrossSeasonGuardTests._COLUMNS
+
+    def setUp(self):
+        super().setUp()
+        self.show.anime = 1
+        self.show.quality = common.Quality.combineQualities([common.Quality.FULLHDBLURAY], [])
+        self.show.save_to_db()
+        # Alias resolves "show name S2" -> show 1 without pinning a season (the gap A1 fills).
+        from sickchill.oldbeard import db, name_cache
+
+        cache_db = db.DBConnection("cache.db")
+        cache_db.action(
+            "INSERT INTO scene_exceptions (indexer_id, show_name, season, custom) VALUES (?, ?, ?, ?)",
+            [1, "show name s2", -1, 1],
+        )
+        name_cache.build_name_cache()
+        self.provider = _make_provider()
+
+    def test_add_cache_entry_files_explicit_season_release_under_correct_season(self):
+        # The cache-add path parses through the same NameParser, so A1 must store the release under
+        # season 2 (not the series-absolute season 1).
+        row = self.provider.cache.add_cache_entry(
+            "[Moozzi2] show name S2 - 01 (BD 1920x1080 x264 FLAC)", "http://example.com/a1", -1, -1, -1
+        )
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0]["season"], 2)
+        self.assertEqual(row[0]["episodes"], "|1|")
+        self.assertEqual(row[0]["indexerid"], 1)
+
+    def test_correct_season_cached_result_is_returned_for_s2(self):
+        # A release filed under S2 with an explicit-S2 name must be returned for wanted S2E1 (the A2
+        # guard allows it because the named season matches the filing season).
+        episode = self.show.get_episode(2, 1)
+        episode.status = common.WANTED
+        episode.save_to_db()
+
+        cache_db = self.provider.cache.get_db()
+        values = {
+            "provider": self.provider.cache.provider_id,
+            "name": "[Moozzi2] show name S2 - 01 (BD 1920x1080 x264 FLAC)",
+            "season": 2,
+            "episodes": "|1|",
+            "indexerid": 1,
+            "url": "http://example.com/a1s2",
+            "time": 1,
+            "quality": common.Quality.FULLHDBLURAY,
+            "release_group": "",
+            "version": -1,
+            "seeders": -1,
+            "leechers": -1,
+            "size": -1,
+        }
+        cache_db.action(
+            "INSERT INTO results ({0}) VALUES ({1})".format(", ".join(self._COLUMNS), ", ".join("?" for _ in self._COLUMNS)),
+            [values[column] for column in self._COLUMNS],
+        )
+
+        needed = self.provider.cache.find_needed_episodes(episode)
+        self.assertTrue(needed.get(episode))
 
 
 if __name__ == "__main__":

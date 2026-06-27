@@ -18,7 +18,7 @@ from sickchill.oldbeard import filters
 from sickchill.oldbeard.common import MULTI_EP_RESULT, SEASON_RESULT, Quality
 from sickchill.oldbeard.db import DBConnection
 from sickchill.oldbeard.helpers import download_file, getURL, make_session, remove_file_failed
-from sickchill.oldbeard.name_parser.parser import InvalidNameException, InvalidShowException, NameParser
+from sickchill.oldbeard.name_parser.parser import extract_explicit_anime_season, InvalidNameException, InvalidShowException, NameParser
 from sickchill.oldbeard.show_name_helpers import all_possible_show_names
 from sickchill.oldbeard.tvcache import TVCache
 from sickchill.providers.result_classes import Proper, SearchResult
@@ -364,20 +364,10 @@ class GenericProvider(object):
         """
         Return a CONFIDENTLY-detected explicit season number from an anime release name, else None.
 
-        Confident tokens only: ``S2`` / ``S02`` / ``Season 2`` (optionally space/dot/underscore
-        separated). Deliberately does NOT treat as a season: a full ``SxxExx`` episode code, Roman
-        numerals (``II``/``III`` — left to the parser's scene-exception handling), or a bare trailing
-        number. Bracketed/parenthesized tags (release group, codec, resolution) are stripped first so
-        a group like ``[S2Productions]`` is not mistaken for a season marker.
+        Thin delegate to the shared :func:`extract_explicit_anime_season` in the name parser so the
+        provider guards (A2) and the parser's explicit-season handling (A1) use ONE implementation.
         """
-        if not title:
-            return None
-        core = re.sub(r"[\[(][^\])]*[\])]", " ", title)
-        # S<n> / S0<n> / Season <n> as a STANDALONE token: must not be preceded by an alnum and must
-        # not be followed by an alnum. The trailing boundary rejects SxxExx codes (S02E03) and stray
-        # tags like "S2Productions" / "S2x264".
-        match = re.search(r"(?<![A-Za-z0-9])S(?:eason)?[ ._]?(\d{1,2})(?![A-Za-z0-9])", core, re.IGNORECASE)
-        return int(match.group(1)) if match else None
+        return extract_explicit_anime_season(title)
 
     @staticmethod
     def _release_season_conflicts(title, allowed_seasons):

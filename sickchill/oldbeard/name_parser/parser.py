@@ -22,6 +22,46 @@ if TYPE_CHECKING:
     from sickchill.tv import TVShow
 
 
+# Confident explicit-season detection for anime release names. Shared by the parser (A1: read the
+# token as the season so search maps "K-ON S2 - 01" -> S2E01) and by GenericProvider's cross-season
+# guards (A2). These depend only on ``re`` so they stay leaf code: GenericProvider/tvcache already
+# import this module, and nothing here imports them, so no import cycle is introduced.
+_ANIME_SEASON_BRACKET_RE = re.compile(r"[\[(][^\])]*[\])]")
+# S<n> / S0<n> / Season <n> as a STANDALONE token: not preceded or followed by an alnum, so SxxExx
+# codes (S02E03) and stray tags ("S2Productions" / "S2x264") are not mistaken for a bare season.
+_ANIME_SEASON_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])S(?:eason)?[ ._]?(\d{1,2})(?![A-Za-z0-9])", re.IGNORECASE)
+
+
+def extract_explicit_anime_season(title):
+    """
+    Return a CONFIDENTLY-detected explicit season number from an anime release name, else None.
+
+    Confident tokens only: ``S2`` / ``S02`` / ``Season 2`` (optionally space/dot/underscore
+    separated). Deliberately does NOT treat as a season: a full ``SxxExx`` episode code, Roman
+    numerals (``II``/``III`` — left to the parser's scene-exception handling), or a bare trailing
+    number. Bracketed/parenthesized tags (release group, codec, resolution) are stripped first so a
+    group like ``[S2Productions]`` is not mistaken for a season marker.
+    """
+    if not title:
+        return None
+    core = _ANIME_SEASON_BRACKET_RE.sub(" ", title)
+    match = _ANIME_SEASON_TOKEN_RE.search(core)
+    return int(match.group(1)) if match else None
+
+
+def strip_explicit_anime_season(title):
+    """
+    Remove a confident explicit season token from a title, collapsing whitespace.
+
+    Used by the parser to verify the remaining title still resolves to the SAME show before trusting
+    the token as a season (so a number that is genuinely part of the canonical title is not mistaken
+    for a season marker).
+    """
+    if not title:
+        return title
+    return re.sub(r"\s+", " ", _ANIME_SEASON_TOKEN_RE.sub(" ", title)).strip()
+
+
 class NameParser(object):
     ALL_REGEX = 0
     NORMAL_REGEX = 1
@@ -273,6 +313,24 @@ class NameParser(object):
                     if indexer_id == best_result.show.indexerid and season is not None and season != -1
                 }
                 season_relative_season = exception_seasons.pop() if len(exception_seasons) == 1 else None
+
+                # A1: no scene exception pinned a season, but the title carries a CONFIDENT explicit
+                # season token (search-time "K-ON S2 - 01" whose ".S2." was swallowed into the series
+                # name and does NOT match the "K-On!! S2" exception). Treat that token as the season --
+                # the same season the double-bang PP filename already gets via its exception -- so
+                # search maps it to the right season instead of the series-absolute season 1. Gated
+                # hard: only when stripping the token STILL resolves to THIS show (so a number that is
+                # genuinely part of the title is not mistaken for a season). This only supplies
+                # season_relative_season; the per-epAbsNo EXISTS check below (Fix B, using the RAW
+                # epAbsNo) still validates (season, episode) and falls back to series-absolute when it
+                # does not exist -- A1 adds no new numbering of its own.
+                if season_relative_season is None:
+                    explicit_season = extract_explicit_anime_season(best_result.series_name)
+                    if explicit_season is not None:
+                        stripped_name = strip_explicit_anime_season(best_result.series_name)
+                        stripped_show = helpers.get_show(stripped_name, False) if stripped_name else None
+                        if stripped_show and stripped_show.indexerid == best_result.show.indexerid:
+                            season_relative_season = explicit_season
 
                 main_db_con = db.DBConnection()
                 for epAbsNo in best_result.ab_episode_numbers:
