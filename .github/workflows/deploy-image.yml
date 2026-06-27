@@ -124,13 +124,19 @@ jobs:
           IMAGE="$(echo "$IMAGE_TAGS" | head -n1)"
           TMPCFG="$(mktemp -d)"
           CID=""
+          # Capture the script's real exit status first, then re-exit with it: the container writes
+          # /config files owned by PUID 99, which the runner user cannot remove, so the datadir cleanup
+          # below would otherwise fail and (as the trap's last command) mask a passing test as failed.
           cleanup() {
+            rc=$?
+            set +e  # never let a cleanup hiccup (e.g. a broken stdout write) abort the trap and mask rc
             if [ -n "$CID" ]; then
               echo "--- container logs (tail) ---"
               docker logs "$CID" 2>&1 | tail -60 || true
               docker rm -f "$CID" >/dev/null 2>&1 || true
             fi
-            rm -rf "$TMPCFG"
+            sudo rm -rf "$TMPCFG" 2>/dev/null || rm -rf "$TMPCFG" 2>/dev/null || true
+            exit "$rc"
           }
           trap cleanup EXIT
           CID="$(docker run -d -p 18081:8081 -e PUID=99 -e PGID=100 -e TZ=Etc/UTC -v "$TMPCFG":/config "$IMAGE")"
