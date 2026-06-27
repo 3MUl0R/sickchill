@@ -949,6 +949,8 @@ class Home(WebRoot):
                 # noinspection PyPep8
                 submenu.append({"title": _("Force Full Update"), "path": f"home/updateShow?show={show_obj.indexerid}&amp;force=1", "icon": "fa fa-exchange"})
                 # noinspection PyPep8
+                submenu.append({"title": _("Force Backlog Search"), "path": f"home/forceBacklog?show={show_obj.indexerid}", "icon": "fa fa-search"})
+                # noinspection PyPep8
                 submenu.append(
                     {
                         "title": _("Update show in KODI"),
@@ -1526,6 +1528,32 @@ class Home(WebRoot):
         time.sleep(cpu_presets[settings.CPU_PRESET])
 
         return self.redirect(f"/home/displayShow?show={show.indexerid}")
+
+    def forceBacklog(self):
+        show = self.get_query_argument("show", default=None)
+
+        error, show_obj = Show.validate_indexer_id(show)
+        if error:
+            return self._genericMessage(_("Error"), error)
+
+        if not show_obj:
+            return self._genericMessage(_("Error"), _("Unable to find the specified show"))
+
+        if show_obj.paused:
+            ui.notifications.error(
+                _("Unable to start backlog search"),
+                _("{show_name} is paused, unpause it first to run a backlog search.").format(show_name=show_obj.name),
+            )
+        else:
+            # queue a full-series backlog for just this show (scans all seasons, ignores the schedule window)
+            settings.backlogSearchScheduler.action.searchBacklog([show_obj])
+            ui.notifications.message(
+                _("Backlog search started"), _("Backlog search started for {show_name}").format(show_name=show_obj.name)
+            )
+
+        time.sleep(cpu_presets[settings.CPU_PRESET])
+
+        return self.redirect(f"/home/displayShow?show={show_obj.indexerid}")
 
     def subtitleShow(self):
         show = self.get_query_argument("show")
