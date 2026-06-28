@@ -860,7 +860,13 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
             if hasattr(curProvider, "freeleech"):
                 curProvider.freeleech = check_setting_bool(settings.CFG, curProvider.get_id().upper(), curProvider.get_id("_freeleech"))
             if hasattr(curProvider, "search_mode"):
-                curProvider.search_mode = check_setting_str(settings.CFG, curProvider.get_id().upper(), curProvider.get_id("_search_mode"), "episode")
+                # Default to the value already parsed (e.g. from a custom provider's pipe string) so a
+                # missing per-provider key does not clobber it; normalize legacy eponly/sponly values.
+                curProvider.search_mode = curProvider.normalize_search_mode(
+                    check_setting_str(
+                        settings.CFG, curProvider.get_id().upper(), curProvider.get_id("_search_mode"), curProvider.search_mode or "episode"
+                    )
+                )
             if hasattr(curProvider, "search_fallback"):
                 curProvider.search_fallback = check_setting_bool(settings.CFG, curProvider.get_id().upper(), curProvider.get_id("_search_fallback"))
             if hasattr(curProvider, "enable_daily"):

@@ -244,10 +244,7 @@ class NewznabProvider(NZBProvider, tvcache.RSSTorrentMixin):
             logger.exception(_("Skipping Newznab provider string: '{0}', incorrect format").format(config))
             return None
 
-        if search_mode == "sponly":
-            search_mode = "season"
-        elif search_mode == "eponly":
-            search_mode = "episode"
+        search_mode = NewznabProvider.normalize_search_mode(search_mode)
 
         new_provider = NewznabProvider(
             name,

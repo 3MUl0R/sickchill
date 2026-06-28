@@ -103,6 +103,8 @@ class TorrentRssProvider(TorrentProvider):
             logger.exception(_("Skipping RSS Torrent provider string: {0}, incorrect format").format(config))
             return None
 
+        search_mode = TorrentRssProvider.normalize_search_mode(search_mode)
+
         new_provider = TorrentRssProvider(
             name,
             url,

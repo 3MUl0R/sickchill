@@ -92,6 +92,19 @@ class GenericProvider(object):
 
         shuffle(self.bt_cache_urls)
 
+    @staticmethod
+    def normalize_search_mode(value):
+        """Map legacy search_mode values onto the current vocabulary.
+
+        Old SickChill/SickRage configs stored ``eponly``/``sponly``; the search
+        code now compares against ``episode``/``season`` exactly, so a stored
+        legacy value matches neither and silently breaks episode search. Unknown,
+        empty, or ``None`` values default to ``episode`` (the historical default).
+        """
+        if (value or "").strip().lower() in ("season", "sponly"):
+            return "season"
+        return "episode"
+
     def download_result(self, result):
         if not self.login():
             return False
