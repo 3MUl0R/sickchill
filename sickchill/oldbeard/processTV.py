@@ -467,47 +467,88 @@ def unrar(path, rar_files, force, result):
     return unpacked_dirs
 
 
+def _episode_scope(parse_result):
+    """Restrict ``tv_episodes`` to the episode(s) a file maps to.
+
+    Returns ``(clause, params, count_column, expected)`` using ``tv_episodes.``-qualified columns (safe
+    when ``history`` is also joined), or ``None`` when we cannot tie the file to a show plus a concrete
+    episode/absolute number. ``expected`` is the number of distinct episodes/absolute numbers the file
+    maps to: **all** of them must be satisfied for ``already_processed`` to short-circuit, so a multi-
+    episode file is never skipped just because one of its episodes is already present. Callers MUST treat
+    ``None`` as "scope unknown" and never fall back to a global match.
+    """
+    show = getattr(parse_result, "show", None) if parse_result else None
+    if not show or not show.indexerid:
+        return None
+
+    if parse_result.season_number is not None and parse_result.episode_numbers:
+        episodes = sorted(set(parse_result.episode_numbers))
+        placeholders = ", ".join(["?"] * len(episodes))
+        clause = f"tv_episodes.showid = ? AND tv_episodes.season = ? AND tv_episodes.episode IN ({placeholders})"
+        return clause, [show.indexerid, parse_result.season_number, *episodes], "tv_episodes.episode", len(episodes)
+
+    if parse_result.ab_episode_numbers:
+        absolutes = sorted(set(parse_result.ab_episode_numbers))
+        placeholders = ", ".join(["?"] * len(absolutes))
+        clause = f"tv_episodes.showid = ? AND tv_episodes.absolute_number IN ({placeholders})"
+        return clause, [show.indexerid, *absolutes], "tv_episodes.absolute_number", len(absolutes)
+
+    return None
+
+
 def already_processed(process_path, video_file, force, result):
     """
-    Check if we already post processed a file
+    Check if we already post processed a file.
+
+    Only treats a file as already-processed when **every** episode it maps to is already
+    Downloaded/Archived under this release name (durable ``tv_episodes.release_name`` guard) or recorded
+    in the download ``history``. A release name that happens to sit on some *other* (or not-yet-downloaded)
+    episode must never short-circuit processing: doing so previously let a stray/duplicated release name
+    cause a real download to be skipped and its folder reaped, leaving the target episode stuck Snatched.
 
     param process_path: Directory a file resides in
     param video_file: File name
-    param force: Force checking when already checking (currently unused)
-    param result: True if file is already postprocessed, False if not
-    :return:
+    param force: Force re-processing (skip these checks)
+    param result: ProcessResult to log into
+    :return: True if the file is already post processed, False otherwise
     """
     if force:
         return False
 
-    # Avoid processing the same dir again if we use a process method <> move
+    # Parse the file itself (not just the folder) so the scope reflects this exact episode; folder-only
+    # parses are under-scoped for season packs and generic parent directories.
+    parse_result: "ParseResult" = postProcessor.guessit_findit(os.path.join(process_path, video_file))
+    scope = _episode_scope(parse_result)
+    if scope is None:
+        # Can't tie this file to a concrete episode -> never skip on a global release-name match.
+        return False
+    scope_clause, scope_params, count_column, expected = scope
+
+    downloaded_or_archived = common.Quality.DOWNLOADED + common.Quality.ARCHIVED
+    status_placeholders = ", ".join(["?"] * len(downloaded_or_archived))
     main_db_con = db.DBConnection()
-    sql_result = main_db_con.select("SELECT release_name FROM tv_episodes WHERE release_name IN (?, ?) LIMIT 1", [process_path, remove_extension(video_file)])
-    if sql_result:
-        # result.output += log_helper("You're trying to post process a dir that's already been processed, skipping", logger.DEBUG)
+
+    # Durable guard (independent of the trimmable history table): all mapped episodes are already
+    # downloaded/archived and carry this exact release name (folder path or file basename).
+    release_sql = (
+        f"SELECT COUNT(DISTINCT {count_column}) FROM tv_episodes "
+        f"WHERE release_name IN (?, ?) AND release_name != '' AND {scope_clause} AND status IN ({status_placeholders})"
+    )
+    rows = main_db_con.select(release_sql, [process_path, remove_extension(video_file), *scope_params, *downloaded_or_archived])
+    if rows and rows[0][0] >= expected:
+        result.output += log_helper("You're trying to post process a dir that's already been processed, skipping", logger.DEBUG)
         return True
 
-    # Needed if we have downloaded the same episode @ different quality
-    # But we need to make sure we check the history of the episode we're going to PP, and not others
-    # if it fails to find any info (because we're doing an unparsable folder (like the TV root dir) it will throw an exception, which we want to ignore
-    parse_result: "ParseResult" = postProcessor.guessit_findit(process_path)
-
-    search_sql = "SELECT tv_episodes.indexerid, history.resource FROM tv_episodes INNER JOIN history ON history.showid=tv_episodes.showid"  # This part is always the same
-    search_sql += " WHERE history.season=tv_episodes.season AND history.episode=tv_episodes.episode"
-
-    # If we find a showid, a season number, and one or more episode numbers than we need to use those in the query
-    if parse_result:
-        if parse_result.show.indexerid:
-            search_sql += f" AND tv_episodes.showid={parse_result.show.indexerid}"
-        if parse_result.season_number is not None and parse_result.episode_numbers:
-            search_sql += f" AND tv_episodes.season={parse_result.season_number} AND tv_episodes.episode={parse_result.episode_numbers[0]}"
-        elif parse_result.ab_episode_numbers:
-            search_sql += f" AND tv_episodes.showid={parse_result.show.indexerid} AND tv_episodes.absolute_number={parse_result.ab_episode_numbers[0]}"
-
-    search_sql += " AND tv_episodes.status IN (" + ",".join([str(x) for x in common.Quality.DOWNLOADED + common.Quality.ARCHIVED]) + ")"
-    search_sql += " AND history.resource LIKE ? LIMIT 1"
-    sql_result = main_db_con.select(search_sql, ["%" + video_file])
-    if sql_result:
+    # History-backed guard (handles the same episode re-downloaded @ different quality): all mapped
+    # episodes are downloaded/archived and history records this resource for them.
+    history_sql = (
+        f"SELECT COUNT(DISTINCT {count_column}) FROM tv_episodes "
+        "INNER JOIN history ON history.showid = tv_episodes.showid "
+        "AND history.season = tv_episodes.season AND history.episode = tv_episodes.episode "
+        f"WHERE {scope_clause} AND tv_episodes.status IN ({status_placeholders}) AND history.resource LIKE ?"
+    )
+    rows = main_db_con.select(history_sql, [*scope_params, *downloaded_or_archived, "%" + video_file])
+    if rows and rows[0][0] >= expected:
         result.output += log_helper("You're trying to post process a video that's already been processed, skipping", logger.DEBUG)
         return True
 
