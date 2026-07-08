@@ -81,12 +81,17 @@ def _get_media_info(file_path: str) -> Dict[str, Any]:
     Returns:
         Dict with resolution, codecs, duration, etc.
     """
+    # Unknown values are represented as "unknown" (not 0 / 0x0). The AI prompt asks the
+    # model to flag wrong resolution and short duration as red flags, so sending fabricated
+    # zeros could make it reject perfectly good files. width/height are kept numeric for any
+    # other consumer; "resolution" is what the prompt renders.
     info = {
+        "resolution": "unknown",
         "width": 0,
         "height": 0,
         "video_codec": "unknown",
         "audio_codec": "unknown",
-        "duration": 0,
+        "duration": "unknown",
         "container": os.path.splitext(file_path)[1].lstrip(".").upper() or "unknown",
     }
 
@@ -97,32 +102,16 @@ def _get_media_info(file_path: str) -> Dict[str, Any]:
         if width and height:
             info["width"] = width
             info["height"] = height
+            info["resolution"] = f"{width}x{height}"
     except Exception as e:
         logger.debug(f"Could not get video dimensions: {e}")
 
-    # Try pymediainfo for more details if available
-    try:
-        from pymediainfo import MediaInfo
-
-        media_info = MediaInfo.parse(file_path)
-        for track in media_info.tracks:
-            if track.track_type == "Video":
-                if track.width:
-                    info["width"] = track.width
-                if track.height:
-                    info["height"] = track.height
-                if track.codec_id or track.format:
-                    info["video_codec"] = track.codec_id or track.format
-                if track.duration:
-                    info["duration"] = int(float(track.duration) / 60000)  # Convert to minutes
-            elif track.track_type == "Audio":
-                if track.codec_id or track.format:
-                    info["audio_codec"] = track.codec_id or track.format
-    except ImportError:
-        logger.debug("pymediainfo not available for detailed media analysis")
-    except Exception as e:
-        logger.debug(f"Could not parse media info: {e}")
-
+    # NOTE: pymediainfo/libmediainfo is intentionally NOT used for richer details
+    # (codec/duration). It can segfault the whole interpreter on Alpine/musl, and a
+    # native segfault is uncatchable, so it would crash-loop post-processing. Codec and
+    # duration stay "unknown"; the AI analyzer relies on the filename (release name) for
+    # those. If richer media info is wanted later, extract it from a crash-safe source
+    # (e.g. enzyme for MKV, or the mediainfo CLI in a subprocess).
     return info
 
 
@@ -217,8 +206,7 @@ def analyze_file(
             filename=filename,
             file_size_mb=file_size_mb,
             container=media_info["container"],
-            width=media_info["width"],
-            height=media_info["height"],
+            resolution=media_info["resolution"],
             video_codec=media_info["video_codec"],
             audio_codec=media_info["audio_codec"],
             duration=media_info["duration"],

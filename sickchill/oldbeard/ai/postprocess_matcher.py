@@ -221,13 +221,10 @@ def _get_file_info(file_path: str) -> Dict[str, Any]:
     except Exception:
         pass
 
-    # Try to get duration using pymediainfo if available
-    try:
-        pass
-        # We can't easily get duration from the current helper, so skip for now
-        # This could be enhanced later
-    except Exception:
-        pass
+    # Duration is intentionally left as "unknown": do NOT reach for pymediainfo/libmediainfo
+    # here — it can segfault the whole interpreter on Alpine/musl (uncatchable). If a duration
+    # is wanted later, read it from a crash-safe source (enzyme for MKV, or mediainfo via a
+    # subprocess).
 
     return info
 

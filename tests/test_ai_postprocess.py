@@ -613,11 +613,12 @@ class TestAnalyzeFile(unittest.TestCase):
         self.media_info_patcher = mock.patch("sickchill.oldbeard.ai.postprocess_analyzer._get_media_info")
         self.mock_media_info = self.media_info_patcher.start()
         self.mock_media_info.return_value = {
+            "resolution": "1920x1080",
             "width": 1920,
             "height": 1080,
             "video_codec": "h264",
             "audio_codec": "aac",
-            "duration": 45,
+            "duration": "45 minutes",
             "container": "MKV",
         }
 
