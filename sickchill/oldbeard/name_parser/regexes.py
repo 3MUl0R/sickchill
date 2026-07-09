@@ -1,5 +1,23 @@
 # all regexes are case-insensitive
 
+# A digit run that is a real episode/season number -- not a slice of a codec ("x264", "H.265"),
+# a resolution label ("1080p"), or either half of a WxH dimension ("1920x1080").
+#
+# This replaces a guard that was written as an ALTERNATION -- ((?!A)|(?!B)) -- which succeeds
+# whenever EITHER lookahead succeeds, so it never blocked anything: "H265" was parsed as absolute
+# episode 265 and "1080p" as episode 1080. The guards must all hold, so they are concatenated.
+# Python requires fixed-width lookbehinds, hence the two separate codec alternatives (x264 / x.264).
+# Each codec guard also requires the digits to actually BE 264/265, so a title that merely ends in a
+# standalone "x"/"h" still parses ("The.X.102" and "Show.Max.102" are season 1, episode 02).
+NUM_GUARD = (
+    r"(?<![0-9])"                                # never start mid-run: no "65" out of "H265"
+    r"(?!(?<=[^A-Za-z0-9][xh])26[45])"           # not the 264 of " x264" / "[h265"
+    r"(?!(?<=[^A-Za-z0-9][xh][.\-_ ])26[45])"    # not the 264 of " x.264" / "[h.265"
+    r"(?<![0-9][x])"                             # not the 1080 of "1920x1080"
+    r"(?!(?:1080|720|480)[pi])"                  # not the 1080 of "1080p"
+    r"(?![0-9]{3,4}[x][0-9]{3,4})"               # not the 1920 of "1920x1080"
+)
+
 
 normal_regexes = [
     (
@@ -191,6 +209,7 @@ normal_regexes = [
         # Show.Name.102.Source.Quality.Etc-Group
         r"""
      ^(?P<series_name>.+?)[. _-]+                # Show_Name and separator
+     @NUM_GUARD@                                 # not a codec/resolution digit run
      (?P<season_num>\d{1,2})                     # 1
      (e?)                                        # Optional episode separator
      (?P<ep_num>\d{2})                           # 02 and separator
@@ -205,6 +224,7 @@ normal_regexes = [
         # 01 - Ep Name
         r"""
      ^((?P<series_name>.+?)(?:[. _-]{2,}|[. _]))?    # Show_Name and separator
+     @NUM_GUARD@                                     # not a codec/resolution digit run
      (?P<ep_num>\d{1,4})                             # 02
      (?:-(?P<extra_ep_num>\d{1,4}))*                 # -03-04-05 etc
      (\s*(?:of)?\s*\d{1,4})?                         # of joiner (with or without spaces) and series total ep
@@ -222,8 +242,8 @@ anime_regexes = [
         r"""
      ^(?:\[(?P<release_group>.+)\][\s\.])
      (?:(?P<series_name>.+?)[\s\.]-[\s\.])
-     (?P<ep_ab_num>((?!(1080|720|480)[pi]))\d{1,4})
-     (-(?P<extra_ab_ep_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4}))?
+     (?P<ep_ab_num>@NUM_GUARD@\d{1,4})
+     (-(?P<extra_ab_ep_num>@NUM_GUARD@\d{1,4}))?
      (?:v(?P<version>[0-9]))?
      (?:[\w\.\s]*)
      (?:(?:(?:[\[\(])(?P<extra_info>\d{3,4}[xp]?\d{0,4}[\.\w\s-]*)(?:[\]\)]))|(?:\d{3,4}[xp]))
@@ -235,8 +255,8 @@ anime_regexes = [
         r"""
      ^(?:\[(?P<release_group>.+?)\][ ._-]*)
      (?P<series_name>.+?)[ ._-]+
-     (?P<ep_ab_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4})
-     (-(?P<extra_ab_ep_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4}))?[ ._-]+?
+     (?P<ep_ab_num>@NUM_GUARD@\d{1,4})
+     (-(?P<extra_ab_ep_num>@NUM_GUARD@\d{1,4}))?[ ._-]+?
      (?:v(?P<version>[0-9]))?
      (?:[\w\.]*)
      (?:(?:(?:[\[\(])(?P<extra_info>\d{3,4}[xp]?\d{0,4}[\.\w\s-]*)(?:[\]\)]))|(?:\d{3,4}[xp]))
@@ -264,7 +284,7 @@ anime_regexes = [
      ((\[|\().+?(\]|\))[ ._-]*)?                                                               # Extra info (Optionnal)
      (?P<series_name>.+?)[ ._-]+                                                               # Show_Name and separator
      ((épisode|episode|Episode)[ ._-]+)?                                                       # Sentence for special fansub (Optionnal)
-     (?P<ep_ab_num>\d{1,4})[ ._-]+                                                             # Episode number and separator
+     (?P<ep_ab_num>@NUM_GUARD@\d{1,4})[ ._-]+                                                  # Episode number and separator
      (((\[|\())?(VOSTFR|vostfr|Vostfr|VostFR|vostFR)((\]|\)))?([ ._-])*)+                      # Subtitle Language and separator
      (par Fansub-Resistance)?                                                                  # Sentence for special fansub (Optionnal)
      (\[((v|V)(?P<version>[0-9]))\]([ ._-])*)?                                                 # Version and separator (Optional)
@@ -285,8 +305,8 @@ anime_regexes = [
         r"""
      ^(\[(?P<release_group>.+?)\][ ._-]*)?                        # Release Group and separator
      (?P<series_name>.+?)[ ._-]+                                 # Show_Name and separator
-     (?P<ep_ab_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4})                                       # E01
-     (-(?P<extra_ab_ep_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4}))?                             # E02
+     (?P<ep_ab_num>@NUM_GUARD@\d{1,4})                                       # E01
+     (-(?P<extra_ab_ep_num>@NUM_GUARD@\d{1,4}))?                             # E02
      (v(?P<version>[0-9]))?                                       # version
      [ ._-]+\[(?P<extra_info>\d{3,4}[xp]?\d{0,4}[\.\w\s-]*)\]       # Source_Quality_Etc-
      (\[(?P<crc>\w{8})\])?                                        # CRC
@@ -300,8 +320,8 @@ anime_regexes = [
         r"""
      ^(\[(?P<release_group>.+?)\][ ._-]*)?                                    # Release Group and separator
      (?P<series_name>.+?)[ ._-]+                                              # Show_Name and separator
-     (?P<ep_ab_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4})                                                   # E01
-     (-(?P<extra_ab_ep_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4}))?                                         # E02
+     (?P<ep_ab_num>@NUM_GUARD@\d{1,4})                                                   # E01
+     (-(?P<extra_ab_ep_num>@NUM_GUARD@\d{1,4}))?                                         # E02
      (v(?P<version>[0-9]))?                                                   # version
      [ ._-]+\((?P<extra_info>(CX[ ._-]?)?\d{3,4}[xp]?\d{0,4}[\.\w\s-]*)\)     # Source_Quality_Etc-
      (\[(?P<crc>\w{8})\])?                                                    # CRC
@@ -314,8 +334,8 @@ anime_regexes = [
         r"""
      ^(\[(?P<release_group>.+?)\][ ._-]*)? # Release Group and separator
      (?P<series_name>.+?)[ ._-]+           # Show_Name and separator
-     (?P<ep_ab_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4})                # E01
-     (-(?P<extra_ab_ep_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4}))?      # E02
+     (?P<ep_ab_num>@NUM_GUARD@\d{1,4})                # E01
+     (-(?P<extra_ab_ep_num>@NUM_GUARD@\d{1,4}))?      # E02
      (v(?P<version>[0-9]))?                # version
      [ ._-]+\[(?P<extra_info>\d{3,4}p)     # Source_Quality_Etc-
      (\[(?P<crc>\w{8})\])?                 # CRC
@@ -331,8 +351,8 @@ anime_regexes = [
      ^(\[(?P<release_group>.+?)\][ ._-]*)?                        # Release Group and separator
      (?P<series_name>.+?)[ ._]*                                   # Show_Name and separator
      ([ ._-]+-[ ._-]+[A-Z]+[ ._-]+)?[ ._-]+                       # funny stuff, this is sooo nuts ! this will kick me in the butt one day
-     (?P<ep_ab_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4})                                       # E01
-     (-(?P<extra_ab_ep_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4}))?                             # E02
+     (?P<ep_ab_num>@NUM_GUARD@\d{1,4})                                       # E01
+     (-(?P<extra_ab_ep_num>@NUM_GUARD@\d{1,4}))?                             # E02
      (v(?P<version>[0-9]))?                                       # version
      ([ ._-](\[\w{1,2}\])?\[[a-z][.]?\w{2,4}\])?                        #codec
      [ ._-]*\[(?P<extra_info>(\d{3,4}[xp]?\d{0,4})?[\.\w\s-]*)\]    # Source_Quality_Etc-
@@ -345,7 +365,7 @@ anime_regexes = [
         r"""
      ^(?:\[(?P<release_group>.*?)\][ ._-]*)?
      (?:(?P<series_name>.*?)[ ._-]*)?
-     (?:(?P<ep_ab_num>(((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4}))[ ._-]*).+?
+     (?:(?P<ep_ab_num>(@NUM_GUARD@\d{1,4}))[ ._-]*).+?
      (?:\[(?P<codec>.*?)\][ ._-]*)
      (?:\[(?P<crc>\w{8})\])?
      .*?
@@ -403,8 +423,8 @@ anime_regexes = [
      (([. _-]*e|-)                                # linking e/- char
      (?P<extra_ep_num>\d+))*                      # additional E03/etc
      ([ ._-]{2,}|[ ._]+)                          # if "-" is used to separate at least something else has to be there(->{2,}) "s16e03-04-313-314" would make sens any way
-     ((?P<ep_ab_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4}))?                       # absolute number
-     (-(?P<extra_ab_ep_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4}))?             # "-" as separator and anditional absolute number, all optinal
+     ((?P<ep_ab_num>@NUM_GUARD@\d{1,4}))?                       # absolute number
+     (-(?P<extra_ab_ep_num>@NUM_GUARD@\d{1,4}))?             # "-" as separator and anditional absolute number, all optinal
      (v(?P<version>[0-9]))?                       # the version e.g. "v2"
      .*?
      """,
@@ -421,8 +441,8 @@ anime_regexes = [
      (([. _-]*e|-)                                # linking e/- char
      (?P<extra_ep_num>\d+))*                      # additional E03/etc
      ([ ._-]{2,}|[ ._]+)                          # if "-" is used to separate at least something else has to be there(->{2,}) "s16e03-04-313-314" would make sens any way
-     ((?P<ep_ab_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4}))?                       # absolute number
-     (-(?P<extra_ab_ep_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4}))?             # "-" as separator and anditional absolute number, all optinal
+     ((?P<ep_ab_num>@NUM_GUARD@\d{1,4}))?                       # absolute number
+     (-(?P<extra_ab_ep_num>@NUM_GUARD@\d{1,4}))?             # "-" as separator and anditional absolute number, all optinal
      (v(?P<version>[0-9]))?                       # the version e.g. "v2"
      .*?
      """,
@@ -432,8 +452,8 @@ anime_regexes = [
         # Bleach - 313-314 - s16e03-04
         r"""
      ^(?P<series_name>.+?)[ ._-]+                 # start of string and series name and non optinal separator
-     (?P<ep_ab_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4})                       # absolute number
-     (-(?P<extra_ab_ep_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4}))?             # "-" as separator and anditional absolute number, all optinal
+     (?P<ep_ab_num>@NUM_GUARD@\d{1,4})                       # absolute number
+     (-(?P<extra_ab_ep_num>@NUM_GUARD@\d{1,4}))?             # "-" as separator and anditional absolute number, all optinal
      (v(?P<version>[0-9]))?                       # the version e.g. "v2"
      ([ ._-]{2,}|[ ._]+)                          # if "-" is used to separate at least something else has to be there(->{2,}) "s16e03-04-313-314" would make sens any way
      [sS](?P<season_num>\d+)[. _-]*               # S01 and optional separator
@@ -447,8 +467,8 @@ anime_regexes = [
         "anime_and_normal_front",
         # 165.Naruto Shippuuden.s08e014
         r"""
-     ^(?P<ep_ab_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4})                       # start of string and absolute number
-     (-(?P<extra_ab_ep_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4}))?              # "-" as separator and anditional absolute number, all optinal
+     ^(?P<ep_ab_num>@NUM_GUARD@\d{1,4})                       # start of string and absolute number
+     (-(?P<extra_ab_ep_num>@NUM_GUARD@\d{1,4}))?              # "-" as separator and anditional absolute number, all optinal
      (v(?P<version>[0-9]))?[ ._-]+                 # the version e.g. "v2"
      (?P<series_name>.+?)[ ._-]+
      [sS](?P<season_num>\d+)[. _-]*                 # S01 and optional separator
@@ -463,8 +483,8 @@ anime_regexes = [
         r"""
      ^(?:\[(?P<release_group>.+?)\][ ._-]*)
      (?P<series_name>.+?)[ ._-]+
-     (?P<ep_ab_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4})
-     (-(?P<extra_ab_ep_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4}))?[ ._-]*?
+     (?P<ep_ab_num>@NUM_GUARD@\d{1,4})
+     (-(?P<extra_ab_ep_num>@NUM_GUARD@\d{1,4}))?[ ._-]*?
      (?:v(?P<version>[0-9])[ ._-]+?)?
      (?:.+?[ ._-]+?)?
      \[(?P<extra_info>\w+)\][ ._-]?
@@ -477,7 +497,7 @@ anime_regexes = [
         # 003. Show Name - Ep Name.ext
         # 003-004. Show Name - Ep Name.ext
         r"""
-     ^(?P<ep_ab_num>\d{3,4})(-(?P<extra_ab_ep_num>\d{3,4}))?\.\s+(?P<series_name>.+?)\s-\s.*
+     ^(?P<ep_ab_num>@NUM_GUARD@\d{3,4})(-(?P<extra_ab_ep_num>@NUM_GUARD@\d{3,4}))?\.\s+(?P<series_name>.+?)\s-\s.*
      """,
     ),
     (
@@ -487,10 +507,16 @@ anime_regexes = [
         r"""
      ^(\[(?P<release_group>.+?)\][ ._-]*)?
      (?P<series_name>.+?)[ ._-]+                         # Show_Name and separator
-     (?P<ep_ab_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4})            # E01
-     (-(?P<extra_ab_ep_num>((?!(1080|720|480)[pi])|(?![hx].?26[45]))\d{1,4}))?  # E02
+     (?P<ep_ab_num>@NUM_GUARD@\d{1,4})            # E01
+     (-(?P<extra_ab_ep_num>@NUM_GUARD@\d{1,4}))?  # E02
      (v(?P<version>[0-9]))?                                                  # v2
      .*?                                                                     # Separator and EOL
      """,
     ),
 ]
+
+
+# Expand @NUM_GUARD@ in every pattern above. Done once here rather than inline so the guard has a
+# single definition and cannot drift between the ~24 sites that need it.
+normal_regexes = [(name, pattern.replace("@NUM_GUARD@", NUM_GUARD)) for name, pattern in normal_regexes]
+anime_regexes = [(name, pattern.replace("@NUM_GUARD@", NUM_GUARD)) for name, pattern in anime_regexes]

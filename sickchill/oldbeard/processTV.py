@@ -2,6 +2,8 @@ import logging
 import os
 import shutil
 import stat
+import threading
+import time
 import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -9,12 +11,115 @@ from typing import TYPE_CHECKING
 from rarfile import BadRarFile, Error, NeedFirstVolume, PasswordRequired, RarCRCError, RarExecError, RarFile, RarOpenError, RarWrongPassword
 
 from sickchill import logger, settings
-from sickchill.helper.common import is_media_file, is_rar_file, is_sync_file, is_torrent_or_nzb_file, remove_extension, valid_url
+from sickchill.helper.common import is_anime_extra, is_media_file, is_rar_file, is_sync_file, is_torrent_or_nzb_file, remove_extension, valid_url
 from sickchill.helper.exceptions import EpisodePostProcessingFailedException, FailedPostProcessingFailedException
 from sickchill.oldbeard import common, db, failedProcessor, helpers, postProcessor
 
 if TYPE_CHECKING:
     from sickchill.oldbeard.name_parser.parser import ParseResult
+
+
+# Auto post-processing rescans the download folder on a short timer (every 2 minutes by default). A
+# file that fails for a PERMANENT reason -- unparseable name, ambiguous release, no matching episode
+# -- fails identically on every pass, re-running the parse, media probe, AI analysis and hashing each
+# time. That is the "post-processing the same thing over and over" loop. Remember failures and back
+# off exponentially. The fingerprint is (size, mtime) so a repaired or replaced file retries at once,
+# and a restart clears the table, so a backoff can never permanently strand a file.
+# Guarded by _failure_backoff_lock: the scheduled auto-processing task and a user-triggered
+# force_next run can touch this concurrently, and the read/evict/update sequences are not atomic.
+_failure_backoff = {}
+_failure_backoff_lock = threading.Lock()
+FAILURE_BACKOFF_BASE_SECONDS = 15 * 60
+FAILURE_BACKOFF_MAX_SECONDS = 24 * 60 * 60
+_FAILURE_BACKOFF_MAX_ENTRIES = 1000
+
+
+def reap_blocker(process_method, mode, delete_on, video_files, failed_files, extra_files):
+    """
+    Say why a just-processed folder must NOT be deleted, or return None when reaping is safe.
+
+    Reaping is an ``rmtree``, so every "keep it" reason here is a data-loss guard. Kept as a pure
+    function of the folder's classification so all four folder states (episodes only / extras only /
+    mixed / neither) can be asserted directly.
+
+    :return: a human-readable reason to keep the folder, or ``None`` to allow deletion
+    """
+    if process_method != "move":
+        # copy/hardlink/symlink deliberately leave the source in place.
+        return "process method is not 'move'"
+    if mode == "manual" and not delete_on:
+        return "manual mode without delete requested"
+    if not video_files:
+        # Nothing was imported from here this pass -- including a folder holding only bonus content.
+        return "no episodes were processed here"
+    if failed_files:
+        return f"{len(failed_files)} unprocessed video file(s) remain: {failed_files}"
+    if extra_files:
+        # Bonus content we declined to import is still the user's file, and a mis-classified episode
+        # would be deleted along with it.
+        return f"keeping {len(extra_files)} bonus file(s) we did not import: {extra_files}"
+    return None
+
+
+def _file_fingerprint(file_path):
+    """Return a cheap (size, mtime) identity for a file, or None if it cannot be read."""
+    try:
+        stat_result = os.stat(file_path)
+    except OSError:
+        return None
+    return stat_result.st_size, int(stat_result.st_mtime)
+
+
+def _backoff_seconds(failures):
+    """Exponential backoff: 15m, 30m, 1h, 2h ... capped at a day."""
+    return min(FAILURE_BACKOFF_BASE_SECONDS * (2 ** (failures - 1)), FAILURE_BACKOFF_MAX_SECONDS)
+
+
+def in_failure_backoff(file_path, force=False):
+    """
+    Check whether a previously-failed file should be skipped this pass.
+
+    A file whose content changed since it failed is retried immediately, as is one the user forced.
+    """
+    if force:
+        return False
+
+    with _failure_backoff_lock:
+        entry = _failure_backoff.get(file_path)
+        if not entry:
+            return False
+
+        fingerprint, failures, last_attempt = entry
+        if _file_fingerprint(file_path) != fingerprint:
+            _failure_backoff.pop(file_path, None)
+            return False
+
+        return (time.time() - last_attempt) < _backoff_seconds(failures)
+
+
+def record_processing_failure(file_path):
+    """Remember that this file failed, lengthening its backoff each consecutive time."""
+    fingerprint = _file_fingerprint(file_path)
+    if not fingerprint:
+        return
+
+    with _failure_backoff_lock:
+        entry = _failure_backoff.get(file_path)
+        failures = entry[1] + 1 if entry and entry[0] == fingerprint else 1
+
+        if len(_failure_backoff) >= _FAILURE_BACKOFF_MAX_ENTRIES:
+            for stale_path in [path for path in _failure_backoff if not os.path.exists(path)]:
+                _failure_backoff.pop(stale_path, None)
+            if len(_failure_backoff) >= _FAILURE_BACKOFF_MAX_ENTRIES:
+                _failure_backoff.pop(next(iter(_failure_backoff)), None)
+
+        _failure_backoff[file_path] = (fingerprint, failures, time.time())
+
+
+def record_processing_success(file_path):
+    """Clear any remembered failure for a file that has now been processed."""
+    with _failure_backoff_lock:
+        _failure_backoff.pop(file_path, None)
 
 
 class ProcessResult(object):
@@ -190,30 +295,35 @@ def process_dir(process_path, release_name=None, process_method=None, force=Fals
             if not validate_dir(current_directory, release_name, failed, result):
                 continue
 
-            video_files = list(filter(is_media_file, filenames))
+            media_files = list(filter(is_media_file, filenames))
+
+            # Creditless openings, commercials, promos and disc menus are not episodes. Left in the
+            # list they parse against the batch folder's name and get filed as a whole season.
+            extra_files = [filename for filename in media_files if is_anime_extra(filename)]
+            video_files = [filename for filename in media_files if filename not in extra_files]
+            # One line per folder, at DEBUG: auto-processing re-walks this folder every couple of
+            # minutes for as long as the extras stay there, and per-file INFO would just replace the
+            # old post-processing loop with a logging loop.
             failed_files = []
             if video_files:
+                if extra_files:
+                    result.output += log_helper(f"{current_directory}: skipping {len(extra_files)} bonus file(s), not episodes: {extra_files}", logger.DEBUG)
                 failed_files = process_media(current_directory, video_files, release_name, process_method, force, is_priority, result)
+            elif extra_files:
+                # Nothing here but bonus content. Nothing was imported and nothing failed, so do not
+                # report a failure, and do not reap: reaping would delete the extras the user kept.
+                result.output += log_helper(f"{current_directory}: only bonus content ({len(extra_files)} file(s)), nothing to process", logger.DEBUG)
+                continue
             else:
                 result.result = False
 
-            # Auto-cleanup only applies to the "move" method (copy/hardlink/symlink leave the
-            # source in place), to auto mode or manual-with-delete, and only when we actually
-            # processed media in this folder this pass.
-            if process_method != "move" or (mode == "manual" and not delete_on) or not video_files:
-                continue
-
-            # Season-aware reaping: never delete a folder while it still holds a video we did
-            # not capture. A file is "uncaptured" only when its post-processing FAILED (failed
-            # parse/match, or still on an AI-match cooldown); files that were moved, matched an
-            # existing destination, or were already processed are "handled". If anything failed,
-            # leave the whole folder so the next scheduler pass (after any AI cooldown) can
-            # retry before the folder is ever reaped.
-            if failed_files:
-                result.output += log_helper(
-                    f"Not reaping {current_directory}: {len(failed_files)} unprocessed video file(s) remain: {failed_files}",
-                    logger.DEBUG,
-                )
+            # Season-aware reaping: never delete a folder while it still holds a video we did not
+            # capture -- a failed parse/match, an AI-match cooldown, or bonus content we declined to
+            # import. Files that were moved, matched an existing destination, or were already
+            # processed are "handled". See reap_blocker for the full decision.
+            blocker = reap_blocker(process_method, mode, delete_on, video_files, failed_files, extra_files)
+            if blocker:
+                result.output += log_helper(f"Not reaping {current_directory}: {blocker}", logger.DEBUG)
                 continue
 
             # The Synology metadata subfolder never holds wanted media: remove it and drop it
@@ -481,6 +591,12 @@ def _episode_scope(parse_result):
     if not show or not show.indexerid:
         return None
 
+    # An ambiguous name ("Ajin 2 - 12" could be absolute episode 2 or season 2 episode 12) has no
+    # trustworthy scope. Scoping it anyway lets already_processed() report the file as handled, which
+    # would drop it from failed_files and let the folder -- and the file -- be reaped.
+    if getattr(parse_result, "ambiguous", False):
+        return None
+
     if parse_result.season_number is not None and parse_result.episode_numbers:
         episodes = sorted(set(parse_result.episode_numbers))
         placeholders = ", ".join(["?"] * len(episodes))
@@ -577,6 +693,12 @@ def process_media(process_path, video_files, release_name, process_method, force
             result.output += log_helper(f"Skipping already processed file: {cur_video_file}", logger.DEBUG)
             continue
 
+        if in_failure_backoff(cur_video_file_path, force):
+            result.output += log_helper(f"Skipping {cur_video_file}: post-processing failed before, waiting before the next attempt", logger.DEBUG)
+            # Still an uncaptured video, so the folder must not be reaped while we wait.
+            failed_files.append(cur_video_file)
+            continue
+
         try:
             processor = postProcessor.PostProcessor(cur_video_file_path, release_name, process_method, is_priority)
             result.result = processor.process()
@@ -589,8 +711,10 @@ def process_media(process_path, video_files, release_name, process_method, force
             result.output += processor.log
 
         if result.result:
+            record_processing_success(cur_video_file_path)
             result.output += log_helper(f"Processing succeeded for {cur_video_file_path}")
         else:
+            record_processing_failure(cur_video_file_path)
             result.output += log_helper(f"Processing failed for {cur_video_file_path}: {process_fail_message}", logger.WARNING)
             result.missed_files.append(f"{cur_video_file_path} : Processing failed: {process_fail_message}")
             result.aggresult = False

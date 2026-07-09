@@ -32,6 +32,52 @@ _ANIME_SEASON_BRACKET_RE = re.compile(r"[\[(][^\])]*[\])]")
 _ANIME_SEASON_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])S(?:eason)?[ ._]?(\d{1,2})(?![A-Za-z0-9])", re.IGNORECASE)
 
 
+# The most episodes a single video file may legitimately contain. Already enforced for ``ep_num``
+# ranges; also applied to absolute ranges so a batch/season-pack name is not read as one huge file.
+MAX_MULTI_EPISODES = 4
+
+# The range of "N" we will read as a season in a "<Title> N - <episode>" release name. Season 1 is
+# excluded on purpose: "Show 1 - 12" is overwhelmingly a 1-12 batch, while a genuine season-1 release
+# is just "Show - 12". "Mob Psycho 100 - 05" is likewise excluded by the upper bound.
+MIN_TITLE_SEASON = 2
+MAX_TITLE_SEASON = 9
+
+# A season pack / complete-series marker. "Show 2 - 12 [Batch]" is a season-2 PACK, not episode 12,
+# so the season reading must not collapse it to a single episode.
+_BATCH_MARKER_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:batch|pack|boxset|box[ ._-]?set|collection|complete|seasons?|vol|volume|s\d+-s?\d+)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+# A number the parser DID NOT consume, sitting right after the number it took as the episode:
+# "[Moozzi2] Ajin 2 - 12 (BD ...)" -> the regex takes 2 as the episode and silently drops "- 12".
+# A genuine release never leaves a stray " - 12" after its episode number, so this is the tell that
+# the leading number was really a season and the parse cannot be trusted as-is.
+#
+# The trailing number must be followed by an info block ("(BD ...", "[1080p]"), a run of bare release
+# tags that reaches the end ("BD 1080p"), or nothing. That keeps a numeric EPISODE TITLE from tripping
+# the check: "Show - 05 - 3 Days Later" has "3" followed by an ordinary word, so it is left alone.
+#
+# The bare-tag branch must consume the WHOLE remainder. Accepting a single tag would misread
+# "- 12 Web of Lies" (a real episode title beginning with the word "Web") as a discarded number.
+# Longest alternatives come first so "WEB-DL" is not matched as a bare "WEB".
+_RELEASE_TAG = r"(?:BluRay|Blu-?Ray|BD-?Rip|BR-?Rip|WEB-?DL|WEB-?Rip|WEB|HDTV|HEVC|AVC|FLAC|AAC|x26[45]|h\.?26[45]|DVD|BD|\d{3,4}[pi])"
+_DISCARDED_EPISODE_NUMBER_RE = re.compile(
+    rf"""
+    ^(?P<lead>[ ._]*)-(?P<trail>[ ._]*)   # a dash separating it from the number we consumed
+    (?!(?:1080|720|480)[pi])              # not a resolution label ("- 1080p BluRay")
+    (?P<number>\d{{1,4}})(?![0-9])        # a whole number
+    (?:v\d)?                              # optional fansub version tag ("- 12v2")
+    (?:
+        [ ._-]*[(\[]                                        # an info block "(BD ..." / "[1080p]"
+      | [ ._-]+(?:{_RELEASE_TAG}(?![A-Za-z0-9])[ ._-]*)+$   # only release tags, to the end
+      | [ ._-]*$                                            # or nothing at all
+    )
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
 def extract_explicit_anime_season(title):
     """
     Return a CONFIDENTLY-detected explicit season number from an anime release name, else None.
@@ -163,7 +209,7 @@ class NameParser(object):
                 ep_num = self._convert_number(match.group("ep_num"))
                 if "extra_ep_num" in named_groups and match.group("extra_ep_num"):
                     tmp_episodes = list(range(ep_num, self._convert_number(match.group("extra_ep_num")) + 1))
-                    if len(tmp_episodes) > 4:
+                    if len(tmp_episodes) > MAX_MULTI_EPISODES:
                         continue
                 else:
                     tmp_episodes = [ep_num]
@@ -174,11 +220,21 @@ class NameParser(object):
             if "ep_ab_num" in named_groups:
                 ep_ab_num = self._convert_number(match.group("ep_ab_num"))
                 if "extra_ab_ep_num" in named_groups and match.group("extra_ab_ep_num"):
-                    result.ab_episode_numbers = list(range(ep_ab_num, self._convert_number(match.group("extra_ab_ep_num")) + 1))
+                    tmp_ab_episodes = list(range(ep_ab_num, self._convert_number(match.group("extra_ab_ep_num")) + 1))
+                    # A season pack / batch folder ("[Group] Ajin 2-12", "Date A Live IV-1-12") is not a
+                    # multi-episode FILE. Absolute ranges were uncapped while ep_num ranges above were
+                    # capped at 4, so a batch name expanded into a 11-12 episode span, and the generated
+                    # destination filename -- which concatenates every episode title in the span -- blew
+                    # past the 255-byte filesystem limit. Apply the same cap to absolute ranges.
+                    if len(tmp_ab_episodes) > MAX_MULTI_EPISODES:
+                        continue
+                    result.ab_episode_numbers = tmp_ab_episodes
                     result.score += 1
                 else:
                     result.ab_episode_numbers = [ep_ab_num]
                 result.score += 1
+
+            self._check_discarded_episode_number(result, name, match)
 
             if "air_date" in named_groups:
                 air_date = match.group("air_date")
@@ -264,8 +320,14 @@ class NameParser(object):
             new_season_numbers = []
             new_absolute_numbers = []
 
+            # "<Title> N - M" ("[Moozzi2] Ajin 2 - 12"): the regex read the season as the episode and
+            # dropped the real one. Take the season reading only when the database confirms it exists;
+            # otherwise the result stays ambiguous and post-processing will refuse it rather than guess.
+            if best_result.ambiguous and self._resolve_title_season(best_result, new_season_numbers, new_episode_numbers, new_absolute_numbers):
+                pass
+
             # if we have an air-by-date show then get the real season/episode numbers
-            if best_result.is_air_by_date:
+            elif best_result.is_air_by_date:
                 airdate = best_result.air_date.toordinal()
                 main_db_con = db.DBConnection()
                 sql_result = main_db_con.select(
@@ -362,6 +424,92 @@ class NameParser(object):
         time.sleep(0.02)
 
         return best_result
+
+    @staticmethod
+    def _check_discarded_episode_number(result, name, match):
+        """
+        Flag a match that consumed a season-looking number as the episode and dropped the real one.
+
+        "[Moozzi2] Ajin 2 - 12 (BD ...)" is *Ajin season 2, episode 12*, but the lazy series_name
+        stops at "Ajin", so the regex takes 2 as the episode and lets ".*?" swallow "- 12". Left
+        alone that files season-2 content into season 1 episode 2. Marking the result ambiguous lets
+        the caller either resolve it (``_resolve_title_season``) or refuse to touch the file.
+        """
+        named_groups = match.groupdict()
+        if named_groups.get("air_date"):
+            return
+
+        consumed = [match.end(group) for group in ("ep_num", "extra_ep_num", "ep_ab_num", "extra_ab_ep_num") if named_groups.get(group)]
+        if not consumed:
+            return
+
+        leftover = _DISCARDED_EPISODE_NUMBER_RE.match(name[max(consumed) :])
+        if not leftover:
+            return
+
+        result.discarded_number = int(leftover.group("number"))
+        # "Ajin 2 - 12" (spaced dash) is the fansub season/episode form; "Ajin 2-12" and
+        # "Date A Live IV-1-12" (bare hyphen) are batch ranges. Both are ambiguous, but only the
+        # spaced form may be resolved as a season -- see _resolve_title_season.
+        result.discarded_number_spaced = bool(leftover.group("lead")) and bool(leftover.group("trail"))
+        result.ambiguous = True
+        result.ambiguity_reason = f"parsed episode number leaves a discarded '{leftover.group(0).strip()}' -- the leading number may be a season"
+
+    def _resolve_title_season(self, best_result, new_season_numbers, new_episode_numbers, new_absolute_numbers):
+        """
+        Read "<Title> N - M" as season N, episode M, but only when the database confirms it.
+
+        Fansub groups publish per-season Blu-rays as "<Title> <season> - <episode>". Accepting the
+        season reading on faith would be exactly as wrong as the parse we are correcting, so every
+        step is checked: N must be a plausible season, the show must be anime, and season N episode M
+        must already exist. Anything less leaves ``best_result.ambiguous`` set, and the file is not
+        post-processed. Returns True when the mapping was accepted.
+        """
+        show = best_result.show
+        if not show or not show.is_anime or best_result.discarded_number is None:
+            return False
+
+        # Only the spaced "Title 2 - 12" form carries a season. A bare hyphen ("Ajin 2-12",
+        # "Date A Live IV-1-12") is a batch/season-pack range and must never collapse to one episode.
+        if not best_result.discarded_number_spaced:
+            return False
+
+        # Nor may a spaced name that advertises itself as a pack: "[Group] Show 2 - 12 [BD][Batch]"
+        # is all twelve episodes of season 2, not episode 12. The database can confirm that S02E12
+        # exists; it cannot tell us the release holds only that episode.
+        if _BATCH_MARKER_RE.search(best_result.original_name or ""):
+            return False
+
+        if len(best_result.episode_numbers) == 1:
+            season = best_result.episode_numbers[0]
+        elif len(best_result.ab_episode_numbers) == 1:
+            season = best_result.ab_episode_numbers[0]
+        else:
+            return False
+
+        episode = best_result.discarded_number
+        if not MIN_TITLE_SEASON <= season <= MAX_TITLE_SEASON:
+            return False
+
+        main_db_con = db.DBConnection()
+        if not main_db_con.select_one(
+            "SELECT 1 FROM tv_episodes WHERE showid = ? AND indexer = ? AND season = ? AND episode = ?",
+            [show.indexerid, show.indexer, season, episode],
+        ):
+            return False
+
+        absolute_number = helpers.get_absolute_number_from_season_and_episode(show, season, episode)
+        if absolute_number:
+            new_absolute_numbers.append(absolute_number)
+        new_season_numbers.append(season)
+        new_episode_numbers.append(episode)
+
+        # The season reading is verified, so the name is no longer ambiguous.
+        best_result.ab_episode_numbers = []
+        best_result.ambiguous = False
+        best_result.ambiguity_reason = None
+        logger.debug(f"Read {best_result.original_name} as {show.name} season {season} episode {episode} (title carries the season)")
+        return True
 
     def _resolve_anime_absolute(self, best_result, numbers, new_season_numbers, new_episode_numbers, new_absolute_numbers, skip_scene_detection):
         """Resolve a list of anime numbers (series-wide absolute, or season-less episode numbers treated as
@@ -572,6 +720,16 @@ class NameParser(object):
         final_result.episode_numbers = self._combine_results(filename_result, dir_name_result, "episode_numbers")
         final_result.scene_season = self._combine_results(filename_result, dir_name_result, "scene_season")
 
+        # Ambiguity belongs to whichever result actually supplied the numbers above -- the same
+        # precedence _combine_results uses (filename first, dirname only as a fallback). A batch
+        # FOLDER is often ambiguous ("Date A Live IV-1-12") while a file inside it is perfectly
+        # clear, and in that case the file's verdict is the one that counts.
+        episode_source = filename_result or dir_name_result
+        if episode_source:
+            final_result.ambiguous = episode_source.ambiguous
+            final_result.ambiguity_reason = episode_source.ambiguity_reason
+            final_result.discarded_number = episode_source.discarded_number
+
         # if the dirname has a release group/show name I believe it over the filename
         final_result.series_name = self._combine_results(dir_name_result, filename_result, "series_name")
         final_result.extra_info = self._combine_results(dir_name_result, filename_result, "extra_info")
@@ -664,6 +822,16 @@ class ParseResult(object):
         self.version = version
 
         self.scene_season = None
+
+        # Set when the name admits more than one credible episode reading and we refused to guess.
+        # Consumers that WRITE to disk (post-processing) must not act on an ambiguous result.
+        # See NameParser._check_discarded_episode_number.
+        self.ambiguous = False
+        self.ambiguity_reason = None
+        # The episode number the regex threw away, when there was one ("Ajin 2 - 12" -> 12), and
+        # whether its dash was spaced (the fansub season form) rather than a batch range hyphen.
+        self.discarded_number = None
+        self.discarded_number_spaced = False
 
     def __eq__(self, other):
         return other and all(

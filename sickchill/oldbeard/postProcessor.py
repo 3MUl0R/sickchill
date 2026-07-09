@@ -189,6 +189,9 @@ class PostProcessor(object):
 
         self.anidbEpisode = None
 
+        # Set when any name we tried had more than one credible episode reading. See _find_info.
+        self.saw_ambiguous_name = False
+
         self.history = History()
 
     def _log(self, message, level=logging.INFO):
@@ -696,6 +699,17 @@ class PostProcessor(object):
         if not parse_result:
             return to_return
 
+        # The name admits more than one credible episode reading ("Ajin 2 - 12" is either absolute
+        # episode 2 or season 2 episode 12) and could not be resolved against the database. Guessing
+        # here writes the file into the wrong episode slot, so decline this name and let the caller
+        # try a more specific one.
+        if parse_result.ambiguous:
+            self._log(f"Refusing to post-process from an ambiguous name [{name}]: {parse_result.ambiguity_reason}", logger.DEBUG)
+            # Remembered for the whole _find_info() pass: if no other name yields a clean match, the
+            # file is refused outright rather than handed to the AI fallback to guess at.
+            self.saw_ambiguous_name = True
+            return to_return
+
         # show object
         show = parse_result.show
 
@@ -843,6 +857,13 @@ class PostProcessor(object):
 
             if show and season and episodes:
                 return show, season, episodes, quality, version
+
+        # An ambiguous name is not a parsing failure the AI can rescue -- it is a name with two
+        # credible readings that the database could not settle. Letting the AI pick one is still a
+        # guess, and a wrong guess writes the file into a real episode's slot. Refuse the whole file.
+        if self.saw_ambiguous_name and (not show or season is None or not episodes):
+            self._log(_("Refusing to post-process: the release name is ambiguous and could not be resolved against the database"), logger.WARNING)
+            return None, None, [], None, None
 
         # If normal matching failed, try AI fallback
         if not show or season is None or not episodes:
@@ -1073,12 +1094,17 @@ class PostProcessor(object):
 
         # reset per-file stuff
         self.in_history = False
+        self.saw_ambiguous_name = False
 
         # reset the anidb episode object
         self.anidbEpisode = None
 
         # try to find the file info
         (show, season, episodes, quality, version) = self._find_info()
+        if self.saw_ambiguous_name and not show:
+            # Distinct from "show not in your list": we know the show, we just cannot tell which
+            # episode this is, and guessing would overwrite a real one.
+            raise EpisodePostProcessingFailedException(_("Ambiguous release name; refusing to guess which episode this is"))
         if not show:
             self._log(_("This show isn't in your list, you need to add it to SC before post-processing an episode"))
             raise EpisodePostProcessingFailedException()

@@ -22,7 +22,7 @@ import sickchill
 import sickchill.oldbeard.providers
 import sickchill.oldbeard.scene_numbering
 from sickchill import logger, settings
-from sickchill.helper.common import dateTimeFormat, episode_num, is_media_file, remove_extension, replace_extension, sanitize_filename, try_int
+from sickchill.helper.common import dateTimeFormat, episode_num, is_media_file, remove_extension, replace_extension, sanitize_filename, truncate_filename, try_int
 from sickchill.helper.exceptions import (
     EpisodeDeletedException,
     EpisodeNotFoundException,
@@ -2580,7 +2580,13 @@ class TVEpisode(object):
         # split off the dirs only, if they exist
         name_groups = re.split(r"[\\/]", pattern)
 
-        return sanitize_filename(self.naming_pattern(name_groups[-1], multi, anime_type))
+        # A multi-episode name concatenates one title per episode, so a long span can exceed the
+        # filesystem's 255-byte component limit and the move fails with [Errno 36]. Clamp it.
+        filename = sanitize_filename(self.naming_pattern(name_groups[-1], multi, anime_type))
+        truncated = truncate_filename(filename)
+        if truncated != filename:
+            logger.warning(_("Episode filename was too long for the filesystem and has been shortened: {filename}").format(filename=filename))
+        return truncated
 
     def rename(self):
         """
