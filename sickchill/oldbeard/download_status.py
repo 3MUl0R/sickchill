@@ -4,8 +4,8 @@ SickChill has always been fire-and-forget: it sends an nzb and never asks again.
 signal it understands is a `_FAILED_` directory turning up in the post-processing folder, which requires the
 client to post-process a failed job into the completed directory. Clients configured not to do that -- and any
 job that is deleted, aborted, or silently stalls -- are never noticed, so the episode sits in a snatched status
-forever. When that status is SNATCHED_BEST, neither the daily nor the backlog search will ever look at it
-again.
+forever. The searches never rescue it either: a dead snatch at a satisfying quality looks identical to a good
+one, so the daily and backlog searches skip it.
 
 This walks the pending_downloads rows written by snatch_episode, asks the client about each job, and hands the
 genuinely failed ones to a FailedQueueItem, which blocks the release and puts the episode back to WANTED.

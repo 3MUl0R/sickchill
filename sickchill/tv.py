@@ -1344,7 +1344,7 @@ class TVShow(object):
                 return True
 
         if (
-            ep_status in Quality.DOWNLOADED + Quality.SNATCHED + Quality.SNATCHED_PROPER
+            ep_status in Quality.DOWNLOADED + Quality.SNATCHED + Quality.SNATCHED_PROPER + Quality.SNATCHED_BEST
             and quality in preferred_qualities
             and (quality > cur_quality or cur_quality not in preferred_qualities)
         ):
@@ -1831,7 +1831,7 @@ class TVEpisode(object):
 
         elif is_media_file(self.location):
             # leave propers alone, you have to either post-process them or manually change them back
-            if self.status not in Quality.SNATCHED_PROPER + Quality.DOWNLOADED + Quality.SNATCHED + Quality.ARCHIVED:
+            if self.status not in Quality.SNATCHED_PROPER + Quality.DOWNLOADED + Quality.SNATCHED + Quality.SNATCHED_BEST + Quality.ARCHIVED:
                 logger.debug(f"5 Status changes from {self.status} to {Quality.statusFromName(self.location)}")
                 self.status = Quality.statusFromName(self.location, anime=self.show.is_anime)
 
