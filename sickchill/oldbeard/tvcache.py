@@ -1,8 +1,8 @@
 import datetime
-import itertools
 import re
 import time
 import traceback
+from collections import defaultdict
 from urllib.parse import urlparse
 
 from sickchill import logger, settings
@@ -173,6 +173,10 @@ class CacheDBConnection(db.DBConnection):
 
 
 class TVCache(RSSTorrentMixin):
+    # Bounds the IN (...) list in find_needed_episodes. SQLITE_MAX_VARIABLE_NUMBER is 999 on older
+    # builds, 32766 on newer ones; 500 plus the provider leaves room under both.
+    SHOW_ID_CHUNK = 500
+
     def __init__(self, provider, **kwargs):
         self.provider = provider
         self.provider_id = self.provider.get_id()
@@ -416,9 +420,74 @@ class TVCache(RSSTorrentMixin):
         propers_results = cache_db_con.select(sql, [self.provider_id])
         return [x for x in propers_results if x["indexerid"]]
 
+    @staticmethod
+    def _cache_row_keys(row):
+        """Yield a (indexerid, season, episode) key for each distinct episode a cached row names.
+
+        This stands in for `episodes LIKE '%|N|%'`, so it has to reproduce that predicate exactly:
+
+        * `LIKE` is NUL-terminated -- `length("\\0|1|")` is 0, not 4 -- so anything at or past the
+          first NUL is invisible to it.
+        * A number only matches when a pipe flanks it on both sides, so "1|2" matches neither 1 nor 2.
+        * "|1|1|" satisfies the predicate once, not twice, hence the dedupe.
+
+        Keys carry the raw column values. SQLite matches `indexerid = 10` against an INTEGER or an
+        equal-valued REAL and nothing else, which is what Python's == and hash already do; coercing
+        with int() would additionally fold 10.5 and b"10" onto 10.
+        """
+        episodes = row["episodes"]
+        if not isinstance(episodes, str):
+            # NULL never satisfied the LIKE. A BLOB does, but then dies in the split("|")[1] below,
+            # taking the whole provider's search with it. add_cache_entry writes neither.
+            return
+
+        indexerid, season = row["indexerid"], row["season"]
+        seen = set()
+        for token in episodes.split("\x00", 1)[0].split("|")[1:-1]:
+            if token and token not in seen:
+                seen.add(token)
+                yield indexerid, season, token
+
+    def _cached_results_for_episodes(self, cache_db_con, episode):
+        """Return the cached rows wanted by `episode`, a list of episode objects.
+
+        This replaces a query per wanted episode, which on a large library held the cache.db lock for
+        a quarter of an hour and blocked post-processing along with it. The wanted shows' rows are
+        fetched once, then the episode list is replayed in order, so the result is what the old
+        queries produced: the same rows, with the same duplicates, in the same order.
+
+        Callers must pass episode objects whose show.indexerid, season and episode are ints, and whose
+        wantedQuality is a list of ints. wanted_episodes() and TVShow.get_episode() guarantee it. The
+        keys below compare raw values, so a str season would silently match nothing.
+        """
+        rows_by_episode = defaultdict(list)
+        show_ids = sorted({episode_object.show.indexerid for episode_object in episode})
+        for offset in range(0, len(show_ids), self.SHOW_ID_CHUNK):
+            chunk = show_ids[offset : offset + self.SHOW_ID_CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            # ORDER BY rowid pins the order the per-episode queries only happened to produce -- SQLite
+            # promises none without it. pick_best_result sorts stably, so ties go to whichever result
+            # arrived first. Chunks partition on indexerid, so a show's rows never straddle two of them.
+            for row in cache_db_con.select(
+                f"SELECT * FROM results WHERE provider = ? AND indexerid IN ({placeholders}) ORDER BY rowid",
+                [self.provider_id, *chunk],
+            ):
+                for key in self._cache_row_keys(row):
+                    rows_by_episode[key].append(row)
+
+        sql_results = []
+        for episode_object in episode:
+            # wantedQuality holds ints, and quality is a TEXT column that the replaced SQL compared
+            # against integer literals under TEXT affinity -- that is, against their canonical decimal
+            # form. Match that. int() would also accept "08", " 8" and b"8".
+            qualities = {str(quality) for quality in episode_object.wantedQuality}
+            key = (episode_object.show.indexerid, episode_object.season, str(episode_object.episode))
+            sql_results += [row for row in rows_by_episode.get(key, ()) if str(row["quality"]) in qualities]
+
+        return sql_results
+
     def find_needed_episodes(self, episode, manual_search=False, down_cur_quality=False):
         needed_eps = {}
-        cl = []
 
         cache_db_con = self.get_db()
         if not episode:
@@ -429,18 +498,7 @@ class TVCache(RSSTorrentMixin):
                 [self.provider_id, episode.show.indexerid, episode.season, "%|" + str(episode.episode) + "|%"],
             )
         else:
-            for episode_object in episode:
-                cl.append(
-                    [
-                        "SELECT * FROM results WHERE provider = ? AND indexerid = ? AND season = ? AND episodes LIKE ? AND quality IN ("
-                        + ",".join([str(x) for x in episode_object.wantedQuality])
-                        + ")",
-                        [self.provider_id, episode_object.show.indexerid, episode_object.season, "%|" + str(episode_object.episode) + "|%"],
-                    ]
-                )
-
-            sql_results = cache_db_con.mass_action(cl, fetchall=True)
-            sql_results = list(itertools.chain(*sql_results))
+            sql_results = self._cached_results_for_episodes(cache_db_con, episode)
 
         # for each cache entry
         for cur_result in sql_results:

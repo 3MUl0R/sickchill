@@ -300,3 +300,38 @@ class AISchemaRepair(AIPhase4Tables):
         self.connection.action("CREATE INDEX IF NOT EXISTS idx_ai_decisions_timestamp ON ai_decisions (timestamp)")
         self.connection.action("CREATE INDEX IF NOT EXISTS idx_ai_decisions_show ON ai_decisions (show_id)")
         self.connection.action("CREATE INDEX IF NOT EXISTS idx_ai_feedback_decision ON ai_feedback (decision_id)")
+
+
+class ResultsIndexes(AISchemaRepair):
+    """Index the results table, which the ResultsTable migration never did.
+
+    InitialSchema indexes results, but only for a database it creates itself. ResultsTable, the
+    migration that folds the legacy per-provider tables into the unified results table, creates
+    it bare. Databases that came up that way full-table-scan every cache lookup, forever.
+
+    The column order is (indexerid, season, provider), not the intuitive provider-first: the
+    manual-search results page queries results without a provider predicate, so a provider-leftmost
+    index cannot serve it. This order serves that query, find_needed_episodes, and the show-deletion
+    cleanup alike.
+    """
+
+    index_name = "idx_results_indexerid_season_provider"
+
+    def test(self):
+        # Index names are global to the database, so the name must be checked against its table.
+        # A same-named index on another table would make has_index() report success while results
+        # stayed unindexed -- which is precisely how results came to be unindexed here, since
+        # InitialSchema's "CREATE UNIQUE INDEX IF NOT EXISTS idx_url ON results" silently no-ops
+        # against the idx_url that the legacy oznzb table already owns.
+        return bool(
+            self.connection.select(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ? AND tbl_name = 'results'",
+                [self.index_name],
+            )
+        )
+
+    def execute(self):
+        if not self.has_table("results"):
+            return
+
+        self.connection.action(f"CREATE INDEX IF NOT EXISTS {self.index_name} ON results (indexerid, season, provider)")
