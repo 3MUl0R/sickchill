@@ -969,9 +969,13 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
             threadName="DAILYSEARCHER",
         )
 
+        # Scheduler sets lastRun = now + run_delay - cycleTime, so a run_delay equal to cycleTime defers the
+        # first run by a whole cycle. An instance that restarts more often than backlog_frequency would then
+        # never search its backlog. A short fixed delay is safe: BacklogSearcher tracks last_backlog in the
+        # DB itself and downgrades early wakeups to a limited (BACKLOG_DAYS) run.
         update_interval = datetime.timedelta(minutes=settings.BACKLOG_FREQUENCY)
         settings.backlogSearchScheduler = searchBacklog.BacklogSearchScheduler(
-            searchBacklog.BacklogSearcher(), cycleTime=update_interval, threadName="BACKLOG", run_delay=update_interval
+            searchBacklog.BacklogSearcher(), cycleTime=update_interval, threadName="BACKLOG", run_delay=datetime.timedelta(minutes=20)
         )
 
         search_intervals = {"15m": 15, "45m": 45, "90m": 90, "4h": 4 * 60, "daily": 24 * 60}
@@ -982,12 +986,15 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
             update_interval = datetime.timedelta(hours=1)
             run_at = datetime.time(hour=1)  # 1 AM
 
+        # Same first-run deferral as the backlog scheduler above: with run_delay=update_interval a daily
+        # propers check never fires on an instance that restarts more than once a day. Capped by the
+        # interval so the short (15m) preset is not made worse than its own cycle.
         settings.properFinderScheduler = scheduler.Scheduler(
             properFinder.ProperFinder(),
             cycleTime=update_interval,
             threadName="FINDPROPERS",
             start_time=run_at,
-            run_delay=update_interval,
+            run_delay=min(update_interval, datetime.timedelta(minutes=25)),
             silent=not settings.DOWNLOAD_PROPERS,
         )
 
@@ -1007,9 +1014,8 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
             silent=not settings.PROCESS_AUTOMATICALLY,
         )
 
-        # run_delay must stay well under cycleTime. Scheduler sets lastRun = now + run_delay - cycleTime, so a
-        # run_delay equal to cycleTime defers the first run by a whole cycle -- which is why the backlog search
-        # never fires on an instance that restarts more often than its backlog_frequency.
+        # run_delay must stay well under cycleTime, or the first poll is deferred by up to a whole cycle
+        # (see the backlog scheduler comment above).
         settings.downloadStatusScheduler = scheduler.Scheduler(
             download_status.DownloadStatusUpdater(),
             run_delay=datetime.timedelta(minutes=1),
