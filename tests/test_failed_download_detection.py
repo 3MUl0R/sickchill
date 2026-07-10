@@ -652,6 +652,14 @@ class MigrationTest(conftest.SickChillTestDBCase):
     filename = "pending_downloads_migration_test.db"
 
     def tearDown(self):
+        # Evict the cached connection before unlinking. On Linux the unlink succeeds while db_cons still
+        # holds the handle, and the next test's writes through it die with SQLITE_READONLY_DBMOVED
+        # ("attempt to write a readonly database"). Windows cannot unlink an open file, which is why this
+        # only ever failed in CI.
+        connection = db.db_cons.pop(self.filename, None)
+        if connection:
+            connection.close()
+        db.db_locks.pop(self.filename, None)
         try:
             os.remove(os.path.join(settings.DATA_DIR, self.filename))
         except OSError:
