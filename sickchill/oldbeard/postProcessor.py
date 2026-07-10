@@ -4,6 +4,7 @@ import os
 import re
 import stat
 import subprocess
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Union
@@ -33,6 +34,14 @@ METHOD_SYMLINK = "symlink"
 METHOD_SYMLINK_REVERSED = "symlink_reversed"
 
 PROCESS_METHODS = [METHOD_COPY, METHOD_MOVE, METHOD_HARDLINK, METHOD_SYMLINK, METHOD_SYMLINK_REVERSED]
+
+# Source files currently being post-processed, keyed by (st_dev, st_ino) so the same file reached
+# through different mount paths still collides. All post-processing (queue tasks, the auto scanner,
+# the API) runs in this process; claiming here is what actually prevents two workers from processing
+# one file concurrently -- path-based checks cannot, and the delete-existing step makes that race
+# destructive (the loser deletes the episode file the winner just landed).
+_claimed_sources_guard = threading.Lock()
+_claimed_sources = set()
 
 # AI Post-Processing - imported lazily to avoid circular imports
 _ai_postprocess_matcher = None
@@ -1072,6 +1081,29 @@ class PostProcessor(object):
 
     def process(self):
         """
+        Post-process a given file, holding an exclusive in-process claim on it for the duration.
+
+        :return: True on success, False on failure
+        """
+        try:
+            file_stat = os.stat(self.directory)
+            claim_key = (file_stat.st_dev, file_stat.st_ino)
+        except OSError:
+            # let _process report the missing file the way it always has
+            return self._process()
+
+        with _claimed_sources_guard:
+            if claim_key in _claimed_sources:
+                raise EpisodePostProcessingFailedException(_("Another post-processor is already handling this file"))
+            _claimed_sources.add(claim_key)
+        try:
+            return self._process()
+        finally:
+            with _claimed_sources_guard:
+                _claimed_sources.discard(claim_key)
+
+    def _process(self):
+        """
         Post-process a given file
 
         :return: True on success, False on failure
@@ -1211,6 +1243,13 @@ class PostProcessor(object):
                     return False
             else:
                 self._log(_("Unable to determine needed file space as the source file is locked for access"))
+
+        # Refuse to delete anything until the source file is confirmed present and readable (movable, for
+        # the methods that relocate it). A concurrent processor reaching this directory through another
+        # path can have consumed the source already; deleting the existing episode files on its behalf
+        # would throw away the file that processor just landed while the DB keeps pointing at it.
+        if helpers.is_file_locked(self.directory, self.process_method in (METHOD_MOVE, METHOD_SYMLINK)):
+            raise EpisodePostProcessingFailedException(_("File is locked for reading/writing"))
 
         # delete the existing file (and company)
         for cur_ep in [episode_object] + episode_object.related_episodes:
