@@ -7,6 +7,10 @@ from sickchill.oldbeard import helpers
 
 session = helpers.make_session()
 
+# nzo_ids per history request. SAB has no documented limit; this keeps the query string well short of what
+# any proxy in front of it is likely to truncate.
+HISTORY_CHUNK = 50
+
 if TYPE_CHECKING:
     from sickchill.providers.result_classes import SearchResult
 
@@ -63,7 +67,71 @@ def send_nzb(result: "SearchResult"):
     logger.debug(f"Result text from SAB: {json_response}")
 
     status, error_ = _check_sab_response(json_response)
+    if status:
+        result.client_id = _get_nzo_id(json_response)
     return status
+
+
+def get_job_states(client_ids):
+    """
+    Ask SAB what became of the given jobs.
+
+    :param client_ids: nzo_ids to look up.
+    :return: {nzo_id: "queued" | "Completed" | "Failed" | <whatever SAB called it>}. Ids SAB knows nothing
+        about are simply absent -- the caller must not read that as failure until it has seen it repeatedly.
+    :raise: ValueError if SAB cannot be reached or answers with something unrecognisable. Never guess.
+    """
+    states = {}
+
+    queue = _api_call({"mode": "queue"})
+    for slot in queue.get("queue", {}).get("slots", []):
+        if slot.get("nzo_id"):
+            states[slot["nzo_id"]] = "queued"
+
+    # SAB truncates on very long URLs, so ask in batches. Verified against SAB 5.0.4: the nzo_ids filter
+    # returns exactly the requested slots.
+    remaining = [client_id for client_id in client_ids if client_id not in states]
+    for offset in range(0, len(remaining), HISTORY_CHUNK):
+        chunk = remaining[offset : offset + HISTORY_CHUNK]
+        history = _api_call({"mode": "history", "nzo_ids": ",".join(chunk)})
+        for slot in history.get("history", {}).get("slots", []):
+            if slot.get("nzo_id"):
+                states[slot["nzo_id"]] = slot.get("status") or ""
+
+    return states
+
+
+def _api_call(params):
+    """Call the SAB api and return the parsed body, raising rather than returning junk on any problem."""
+    params = dict(params, output="json")
+    if settings.SAB_USERNAME:
+        params["ma_username"] = settings.SAB_USERNAME
+    if settings.SAB_PASSWORD:
+        params["ma_password"] = settings.SAB_PASSWORD
+    if settings.SAB_APIKEY:
+        params["apikey"] = settings.SAB_APIKEY
+
+    url = urljoin(settings.SAB_HOST, "api")
+    jdata = helpers.getURL(url, params=params, session=session, returns="json", verify=False)
+
+    if not isinstance(jdata, dict) or "error" in jdata:
+        raise ValueError(f"SAB did not answer {params['mode']}: {jdata}")
+
+    return jdata
+
+
+def _get_nzo_id(jdata) -> str:
+    """
+    Pull the queued job's id out of an addurl/addfile response.
+
+    SAB answers {"status": true, "nzo_ids": ["<uuid>"]}. Without the id there is no way to ask SAB later
+    whether the job succeeded, so the download is untracked -- that is a degradation, not an error.
+    """
+    try:
+        return str(jdata["nzo_ids"][0])
+    except (KeyError, IndexError, TypeError):
+        logger.debug("SAB accepted the nzb but returned no nzo_id; this download will not be tracked")
+        return ""
 
 
 def _check_sab_response(jdata):

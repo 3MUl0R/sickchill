@@ -47,6 +47,10 @@ class SearchResult(object):
         # hash
         self.hash: str = ""
 
+        # the download client's id for the job this result was sent to, set by sab.send_nzb /
+        # nzbget.send_nzb. Empty when the client does not report one (blackhole, torrents, nzbget < 13).
+        self.client_id: str = ""
+
         # content
         self.content = None
 

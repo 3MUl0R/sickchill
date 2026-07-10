@@ -16,8 +16,40 @@ if TYPE_CHECKING:
 
 from sickchill.helper.common import remove_extension, try_int
 from sickchill.helper.exceptions import EpisodeNotFoundException
-from sickchill.oldbeard.common import FAILED, SNATCHED, SUBTITLED, WANTED, Quality
+from sickchill.oldbeard.common import (
+    ARCHIVED,
+    DOWNLOADED,
+    FAILED,
+    IGNORED,
+    SKIPPED,
+    SNATCHED,
+    SNATCHED_BEST,
+    SNATCHED_PROPER,
+    SUBTITLED,
+    UNAIRED,
+    WANTED,
+    Quality,
+)
 from sickchill.oldbeard.db import DBConnection
+
+# Statuses mark_failed will act on. SNATCHED* is the normal case; FAILED means a previous mark_failed
+# wrote the status and then died before logging or reverting, so the work should be finished, not skipped.
+RESUMABLE_STATUSES = (SNATCHED, SNATCHED_PROPER, SNATCHED_BEST, FAILED)
+
+# Statuses an episode may safely be restored to. Reverting into a SNATCHED* status would drop the episode
+# into the state neither the daily nor the backlog search looks at; reverting into FAILED loops.
+RESTORABLE_STATUSES = (WANTED, DOWNLOADED, ARCHIVED, SKIPPED, IGNORED, UNAIRED)
+
+
+def _restorable(status) -> bool:
+    """True when `status` is a composite status an episode can be safely reverted to."""
+    if status is None:
+        return False
+    try:
+        base = Quality.splitCompositeStatus(int(status))[0]
+    except (TypeError, ValueError):
+        return False
+    return base in RESTORABLE_STATUSES
 
 
 class History(object, metaclass=Singleton):
@@ -210,13 +242,16 @@ class History(object, metaclass=Singleton):
                 Quality.compositeStatus(SUBTITLED, quality), show, season, episode, quality, subtitle.language.opensubtitles, subtitle.provider_name
             )
 
-    def log_failed(self, episode_object: "TVEpisode", release: str, provider: str = ""):
+    def log_failed(self, episode_object: "TVEpisode", release: str, provider: str = "", size: int = None):
         """
         Log a failed download
 
         :param episode_object: Episode object
         :param release: Release group
         :param provider: Provider used for snatch
+        :param size: Size of the release. When known, pass it: pick_best_result rejects a result only when
+            (name, size, provider) matches a failed row exactly, and the size derived below can come out as
+            -1, which no real result ever has -- a row that blocks nothing.
         """
 
         status, quality = Quality.splitCompositeStatus(episode_object.status)
@@ -227,10 +262,23 @@ class History(object, metaclass=Singleton):
         if not settings.USE_FAILED_DOWNLOADS:
             return
 
-        size = -1
-
         release = self.prepare_failed_name(release)
 
+        if size is None:
+            size, provider = self._derive_failed_size(release, provider)
+
+        if not self.has_failed(release, size, provider):
+            self.failed_db.action('INSERT INTO failed ("release", size, provider) VALUES (?, ?, ?)', [release, size, provider])
+
+        self.remove_snatch(release, size, provider)
+
+    def _derive_failed_size(self, release: str, provider: str):
+        """Recover a release's size and provider from the snatch history. `release` must already be prepared.
+
+        Only used when the caller does not know the size. The multi-size branch gives up and records -1,
+        which has_failed can never match against a real result, so the resulting failed row blocks nothing.
+        """
+        size = -1
         sql_results = self.failed_db.select('SELECT * FROM history WHERE "release" = ?', [release])
 
         if not sql_results:
@@ -254,10 +302,7 @@ class History(object, metaclass=Singleton):
             size = sql_results[0]["size"]
             provider = sql_results[0]["provider"]
 
-        if not self.has_failed(release, size, provider):
-            self.failed_db.action('INSERT INTO failed ("release", size, provider) VALUES (?, ?, ?)', [release, size, provider])
-
-        self.remove_snatch(release, size, provider)
+        return size, provider
 
     @staticmethod
     def prepare_failed_name(release: str):
@@ -292,56 +337,156 @@ class History(object, metaclass=Singleton):
             )
         )
 
-    def revert_episode(self, episode_object: "TVEpisode"):
-        """Restore the episodes of a failed download to their original state"""
-        if not settings.USE_FAILED_DOWNLOADS:
-            return
+    def find_old_status(self, episode_object: "TVEpisode"):
+        """The most recent snatch history entry for this episode that names a status worth restoring.
 
+        Ordered ascending so the dict comprehension's last-wins semantics keep the newest row. Rows whose
+        old_status is itself a snatched status are skipped: an episode re-snatched after an earlier snatch
+        died records that dead snatched status as its "original" one, and restoring it would put the episode
+        right back where no searcher looks.
+        """
         sql_results = self.failed_db.select(
-            "SELECT episode, old_status FROM history WHERE showid = ? AND season = ?", [episode_object.show.indexerid, episode_object.season]
+            "SELECT episode, old_status FROM history WHERE showid = ? AND season = ? ORDER BY date ASC",
+            [episode_object.show.indexerid, episode_object.season],
         )
 
-        history_eps = {res["episode"]: res for res in sql_results}
+        history_eps = {res["episode"]: res["old_status"] for res in sql_results if _restorable(res["old_status"])}
+        return history_eps.get(episode_object.episode)
 
-        try:
-            logger.info(f"Reverting episode ({episode_object.season}, {episode_object.episode}): {episode_object.episode}")
-            with episode_object.lock:
-                if episode_object.episode in history_eps:
-                    logger.info("Found in history")
-                    episode_object.status = history_eps[episode_object.episode]["old_status"]
-                else:
-                    logger.debug("Episode don't have a previous snatched status to revert. Setting it back to WANTED")
-                    episode_object.status = WANTED
-                    episode_object.save_to_db()
+    def revert_episode(self, episode_object: "TVEpisode", old_status=None, expect_status=None) -> bool:
+        """Restore a failed download's episode to the state it held before the snatch.
 
-        except EpisodeNotFoundException as error:
-            logger.warning(f"Unable to create episode, please set its status manually: {error}")
-
-    def mark_failed(self, episode_object: "TVEpisode"):
-        """
-        Mark an episode_object as failed
-
-        :param episode_object: Episode object to mark as failed
-        :return: empty string
+        :param old_status: a hint, usually the status recorded at snatch time. Consulted only if restorable;
+            otherwise the snatch history is searched, and failing that the episode is set back to WANTED.
+        :param expect_status: when given, the revert only happens while the episode still holds this exact
+            composite status. snatch_episode and the post-processor both mutate an episode in memory before
+            persisting it, so the in-memory value is the authoritative one and is checked first; the
+            conditional UPDATE then catches a status written straight to the database by someone else.
+        :return: True when the episode was reverted. False means something else owns it now.
         """
         if not settings.USE_FAILED_DOWNLOADS:
-            return
+            return False
 
-        logger.info(f"Marking episode as bad: [{episode_object.pretty_name}]")
         try:
             with episode_object.lock:
-                quality = Quality.splitCompositeStatus(episode_object.status)[1]
-                episode_object.status = Quality.compositeStatus(FAILED, quality)
-                episode_object.save_to_db()
+                return self._revert_episode_locked(episode_object, old_status, expect_status)
+        except EpisodeNotFoundException as error:
+            logger.warning(f"Unable to create episode, please set its status manually: {error}")
+            return False
+
+    def _revert_episode_locked(self, episode_object: "TVEpisode", old_status=None, expect_status=None) -> bool:
+        """revert_episode's body. The caller must already hold episode_object.lock.
+
+        mark_failed holds that lock across its whole operation, so the status it wrote cannot be replaced by a
+        newer snatch between the write and this revert. Without that, mark_failed could report success on an
+        episode it had just lost ownership of, and its caller would search and snatch over the live download.
+        """
+        if not _restorable(old_status):
+            old_status = self.find_old_status(episode_object)
+
+        if not _restorable(old_status):
+            old_status = WANTED
+            if episode_object.location:
+                logger.warning(
+                    f"No restorable status found for {episode_object.pretty_name}, setting it back to WANTED even though a file exists at "
+                    f"{episode_object.location}. It may be downloaded again."
+                )
+
+        logger.info(f"Reverting episode ({episode_object.season}, {episode_object.episode}): {episode_object.episode}")
+
+        if expect_status is None:
+            episode_object.status = old_status
+            episode_object.save_to_db()
+            return True
+
+        if episode_object.status != expect_status:
+            logger.info(f"Not reverting {episode_object.pretty_name}, something else changed its status first")
+            return False
+
+        result = self.db.action(
+            "UPDATE tv_episodes SET status = ? WHERE showid = ? AND season = ? AND episode = ? AND status = ?",
+            [old_status, episode_object.show.indexerid, episode_object.season, episode_object.episode, expect_status],
+        )
+        if not getattr(result, "rowcount", 0):
+            logger.info(f"Not reverting {episode_object.pretty_name}, its stored status changed while we were reverting it")
+            return False
+
+        episode_object.status = old_status
+        episode_object.save_to_db()
+        return True
+
+    def mark_failed(
+        self, episode_object: "TVEpisode", release: str = None, provider: str = None, size: int = None, old_status=None, client_id=None, force=False
+    ):
+        """
+        Mark an episode_object as failed: block the release, then restore the episode's previous status.
+
+        :param release: the release that failed. When known, pass it; otherwise the most recent snatch of
+            this episode is looked up, which is a guess when the episode was snatched more than once.
+        :param size: size of that release, forwarded to log_failed.
+        :param old_status: status to restore, forwarded to revert_episode.
+        :param client_id: the download client's id for the job that failed. If the episode has since been
+            snatched again, this will not match the id stamped on the episode and nothing is done -- failing
+            the newer job would abandon a healthy download.
+        :param force: skip the status check. For the Retry button, which is a deliberate user action on an
+            episode that may already be downloaded.
+        :return: True when the episode was marked and reverted, False when a guard declined. Callers must not
+            search for an episode this declined: it belongs to a newer download, and searching would snatch
+            over the top of one that is working.
+
+        The whole operation runs under episode_object.lock. Releasing it between writing FAILED and reverting
+        would let a snatch land in the gap, and this would report success on an episode it no longer owned.
+        """
+        if not settings.USE_FAILED_DOWNLOADS:
+            return False
+
+        logger.info(f"Marking episode as bad: [{episode_object.pretty_name}]")
+
+        try:
+            with episode_object.lock:
+                # Both the status and snatch_client_id are written inside this lock by snatch_episode, so
+                # comparing them here cannot see one without the other.
+                #
+                # The stamp is three-valued, and the difference is load-bearing:
+                #   None -- this process has not snatched this episode. The stamp does not survive a restart,
+                #           so it is absent rather than stale, and says nothing either way. Proceed.
+                #   ""   -- snatched by a client that reports no job id: a torrent, blackhole, nzbget < 13.
+                #           Still a *newer* snatch than the one that failed, so decline.
+                #   "id" -- snatched as that job. Decline unless it is the job we were asked to fail.
+                stamped = getattr(episode_object, "snatch_client_id", None)
+                if client_id and stamped is not None and stamped != client_id:
+                    logger.info(f"Not failing {episode_object.pretty_name}, it has been snatched again since this download failed")
+                    return False
+
+                status, quality = Quality.splitCompositeStatus(episode_object.status)
+                if not force and status not in RESUMABLE_STATUSES:
+                    logger.info(f"Not failing {episode_object.pretty_name}, its status is no longer snatched")
+                    return False
+
+                if status == FAILED:
+                    # A previous mark_failed wrote this and died before logging or reverting. Finish the job,
+                    # but keep the status around so the revert below stays conditional on it.
+                    composite_failed = episode_object.status
+                else:
+                    composite_failed = Quality.compositeStatus(FAILED, quality)
+                    episode_object.status = composite_failed
+                    episode_object.save_to_db()
+
+                # Read before log_failed, whose remove_snatch deletes the very row this reads.
+                if old_status is None:
+                    old_status = self.find_old_status(episode_object)
+
+                if not release:
+                    (release, provider) = self.find_release(episode_object)
+
+                if release:
+                    self.log_failed(episode_object, release, provider, size=size)
+
+                return self._revert_episode_locked(episode_object, old_status=old_status, expect_status=composite_failed)
 
         except EpisodeNotFoundException as error:
             logger.warning(f"Unable to get episode, please set its status manually: {error}")
-
-        (release, provider) = self.find_release(episode_object)
-        if release:
-            self.log_failed(episode_object, release, provider)
-
-        self.revert_episode(episode_object)
+            return False
 
     def remove_snatch(self, release: str, size: int, provider: str):
         """
@@ -355,34 +500,22 @@ class History(object, metaclass=Singleton):
 
     def find_release(self, episode_object: "TVEpisode"):
         """
-        Find releases in history by show ID and season.
-        Return None for release if multiple found or no release found.
+        The most recently snatched release for this episode, as (release, provider).
+
+        A guess when the episode was snatched more than once: only the caller knows which release actually
+        failed. Prefer passing the release to mark_failed. Returns (None, None) when nothing is recorded.
         """
 
-        # Clear old snatches for this release if any exist
-        # self.failed_db.action(
-        #     "DELETE FROM history WHERE showid = {0} AND season = {1} AND episode = {2}"
-        #     " AND date < (SELECT max(date) FROM history WHERE showid = {0} AND season = {1} AND episode = {2})".format
-        #     (episode_object.show.indexerid, episode_object.season, episode_object.episode)
-        # )
-
-        # Search for release in snatch history
-        results = self.failed_db.select(
-            'SELECT "release", provider, date FROM history WHERE showid = ? AND season = ? AND episode = ?',
+        # Search for release in snatch history. Newest first: without an order SQLite may return any row,
+        # so an episode snatched twice could have the wrong -- possibly good -- release blocked.
+        result = self.failed_db.select_one(
+            'SELECT "release", provider FROM history WHERE showid = ? AND season = ? AND episode = ? ORDER BY date DESC',
             [episode_object.show.indexerid, episode_object.season, episode_object.episode],
         )
 
-        for result in results:
-            release = str(result["release"])
-            provider = str(result["provider"])
-            date = result["date"]
-
-            # Clear any incomplete snatch records for this release if any exist
-            self.failed_db.action('DELETE FROM history WHERE "release" = ? AND date <> ?', [release, date])
-
-            # Found a previously failed release
+        if result:
             logger.debug(f"Failed release found for season ({episode_object.season}): ({result['release']})")
-            return release, provider
+            return str(result["release"]), str(result["provider"])
 
         # Release was not found
         logger.debug(f"No releases found for season ({episode_object.season}) of ({episode_object.show.indexerid})")

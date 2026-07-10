@@ -17,6 +17,7 @@ from sickchill.oldbeard import (
     config,
     dailysearcher,
     db,
+    download_status,
     helpers,
     image_cache,
     naming,
@@ -752,6 +753,20 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
         settings.USE_FAILED_DOWNLOADS = check_setting_bool(settings.CFG, "FailedDownloads", "use_failed_downloads")
         settings.DELETE_FAILED = check_setting_bool(settings.CFG, "FailedDownloads", "delete_failed")
 
+        settings.FAILED_DOWNLOAD_POLL_FREQUENCY = max(
+            settings.MIN_FAILED_DOWNLOAD_POLL_FREQUENCY,
+            check_setting_int(settings.CFG, "FailedDownloads", "failed_download_poll_frequency", settings.FAILED_DOWNLOAD_POLL_FREQUENCY),
+        )
+        settings.FAILED_DOWNLOAD_ABSENT_CYCLES = max(1, check_setting_int(settings.CFG, "FailedDownloads", "failed_download_absent_cycles", settings.FAILED_DOWNLOAD_ABSENT_CYCLES))
+        settings.FAILED_DOWNLOAD_VANISHED_HOURS = max(1, check_setting_int(settings.CFG, "FailedDownloads", "failed_download_vanished_hours", settings.FAILED_DOWNLOAD_VANISHED_HOURS))
+        settings.FAILED_DOWNLOAD_PP_STUCK_HOURS = max(1, check_setting_int(settings.CFG, "FailedDownloads", "failed_download_pp_stuck_hours", settings.FAILED_DOWNLOAD_PP_STUCK_HOURS))
+        settings.FAILED_DOWNLOAD_ROW_TTL_DAYS = max(1, check_setting_int(settings.CFG, "FailedDownloads", "failed_download_row_ttl_days", settings.FAILED_DOWNLOAD_ROW_TTL_DAYS))
+        settings.FAILED_DOWNLOAD_ROW_MAX_AGE_DAYS = max(
+            settings.FAILED_DOWNLOAD_ROW_TTL_DAYS,
+            check_setting_int(settings.CFG, "FailedDownloads", "failed_download_row_max_age_days", settings.FAILED_DOWNLOAD_ROW_MAX_AGE_DAYS),
+        )
+        settings.FAILED_DOWNLOAD_MAX_ENQUEUES = max(1, check_setting_int(settings.CFG, "FailedDownloads", "failed_download_max_enqueues", settings.FAILED_DOWNLOAD_MAX_ENQUEUES))
+
         settings.BACKLOG_MISSING_ONLY = check_setting_bool(settings.CFG, "General", "backlog_missing_only")
 
         settings.IGNORE_WORDS = check_setting_str(settings.CFG, "General", "ignore_words", settings.IGNORE_WORDS)
@@ -992,6 +1007,17 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
             silent=not settings.PROCESS_AUTOMATICALLY,
         )
 
+        # run_delay must stay well under cycleTime. Scheduler sets lastRun = now + run_delay - cycleTime, so a
+        # run_delay equal to cycleTime defers the first run by a whole cycle -- which is why the backlog search
+        # never fires on an instance that restarts more often than its backlog_frequency.
+        settings.downloadStatusScheduler = scheduler.Scheduler(
+            download_status.DownloadStatusUpdater(),
+            run_delay=datetime.timedelta(minutes=1),
+            cycleTime=datetime.timedelta(minutes=settings.FAILED_DOWNLOAD_POLL_FREQUENCY),
+            threadName="DOWNLOADSTATUS",
+            silent=not settings.USE_FAILED_DOWNLOADS,
+        )
+
         settings.traktCheckerScheduler = scheduler.Scheduler(
             traktChecker.TraktChecker(),
             run_delay=datetime.timedelta(minutes=5),
@@ -1061,6 +1087,10 @@ def start():
             settings.autoPostProcessorScheduler.enable = settings.PROCESS_AUTOMATICALLY
             settings.autoPostProcessorScheduler.start()
 
+            # start asking the download client what became of our snatches
+            settings.downloadStatusScheduler.enable = settings.USE_FAILED_DOWNLOADS
+            settings.downloadStatusScheduler.start()
+
             # start the subtitles finder
             settings.subtitlesFinderScheduler.enable = settings.USE_SUBTITLES
             settings.subtitlesFinderScheduler.start()
@@ -1088,6 +1118,7 @@ def halt():
                 settings.searchQueueScheduler,
                 settings.autoPostProcessorScheduler,
                 settings.postProcessorTaskScheduler,
+                settings.downloadStatusScheduler,
                 settings.traktCheckerScheduler,
                 settings.properFinderScheduler,
                 settings.subtitlesFinderScheduler,
@@ -1749,6 +1780,13 @@ def save_config():
             "FailedDownloads": {
                 "use_failed_downloads": int(settings.USE_FAILED_DOWNLOADS),
                 "delete_failed": int(settings.DELETE_FAILED),
+                "failed_download_poll_frequency": int(settings.FAILED_DOWNLOAD_POLL_FREQUENCY),
+                "failed_download_absent_cycles": int(settings.FAILED_DOWNLOAD_ABSENT_CYCLES),
+                "failed_download_vanished_hours": int(settings.FAILED_DOWNLOAD_VANISHED_HOURS),
+                "failed_download_pp_stuck_hours": int(settings.FAILED_DOWNLOAD_PP_STUCK_HOURS),
+                "failed_download_row_ttl_days": int(settings.FAILED_DOWNLOAD_ROW_TTL_DAYS),
+                "failed_download_row_max_age_days": int(settings.FAILED_DOWNLOAD_ROW_MAX_AGE_DAYS),
+                "failed_download_max_enqueues": int(settings.FAILED_DOWNLOAD_MAX_ENQUEUES),
             },
             "ANIDB": {
                 "use_anidb": int(settings.USE_ANIDB),

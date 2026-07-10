@@ -294,6 +294,7 @@ METADATA_WDTV = None
 MIN_AUTOPOSTPROCESSOR_FREQUENCY = 1
 MIN_BACKLOG_FREQUENCY = 10
 MIN_DAILYSEARCH_FREQUENCY = 10
+MIN_FAILED_DOWNLOAD_POLL_FREQUENCY = 1
 MIN_UPDATE_FREQUENCY = 1
 MOVE_ASSOCIATED_FILES = False
 MY_ARGS = []
@@ -595,6 +596,20 @@ USE_EMAIL = False
 USE_EMBY = False
 USE_JELLYFIN = False
 USE_FAILED_DOWNLOADS = False
+# How often to ask the download client what became of the episodes we snatched, in minutes.
+FAILED_DOWNLOAD_POLL_FREQUENCY = 5
+# A job the client cannot account for is treated as failed only after this many consecutive polls have found
+# it in neither the queue nor the history, AND this long has passed since we snatched it.
+FAILED_DOWNLOAD_ABSENT_CYCLES = 3
+FAILED_DOWNLOAD_VANISHED_HOURS = 12
+# The client says it downloaded, but post-processing never picked the episode up. Warn after this long.
+FAILED_DOWNLOAD_PP_STUCK_HOURS = 6
+# Stop tracking a completed-but-unimported download after this long. The episode is left as it is.
+FAILED_DOWNLOAD_ROW_TTL_DAYS = 14
+# Backstop for a download the client will not account for at all. Never fails the episode.
+FAILED_DOWNLOAD_ROW_MAX_AGE_DAYS = 60
+# Give up retrying a failed download after this many attempts.
+FAILED_DOWNLOAD_MAX_ENQUEUES = 3
 USE_FREE_SPACE_CHECK = True
 USE_FREEMOBILE = False
 USE_GOTIFY = False

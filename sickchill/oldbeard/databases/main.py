@@ -311,3 +311,36 @@ class AddCustomNameToShow(AddPreferWords):
         self.add_column("tv_shows", "custom_name", "TEXT", "")
         self.inc_minor_version()
         logger.info("Updated to: {0:d}.{1:d}".format(*self.connection.version))
+
+
+class AddPendingDownloads(AddCustomNameToShow):
+    """Track snatched downloads so the client can be asked whether they succeeded.
+
+    It lives here rather than in failed.db so that snatch_episode can write the row and the episode's
+    SNATCHED status in one mass_action transaction; db.mass_action commits once per database file, and
+    there is no cross-database atomicity to lean on.
+    """
+
+    table_name = "pending_downloads"
+
+    def test(self):
+        return self.has_table(self.table_name)
+
+    def execute(self):
+        backup_database(self.connection.full_path, self.connection.version)
+
+        logger.info("Adding table pending_downloads")
+        self.connection.action(
+            f"CREATE TABLE {self.table_name} ("
+            "showid NUMERIC NOT NULL, season NUMERIC NOT NULL, episode NUMERIC NOT NULL, "
+            "client_id TEXT NOT NULL, client TEXT NOT NULL, release_name TEXT NOT NULL, provider TEXT NOT NULL, "
+            "size NUMERIC DEFAULT -1, old_status NUMERIC NOT NULL, state TEXT NOT NULL DEFAULT 'pending', "
+            "snatch_time NUMERIC NOT NULL, state_time NUMERIC NOT NULL, "
+            "absent_count NUMERIC DEFAULT 0, enqueue_count NUMERIC DEFAULT 0, warned NUMERIC DEFAULT 0, "
+            "PRIMARY KEY (showid, season, episode))"
+        )
+
+        # No secondary index on client_id: every lookup is by the full primary key, with client_id only ever
+        # an extra AND on the WHERE. Adding one would index nothing anybody queries.
+        self.inc_minor_version()
+        logger.info("Updated to: {0:d}.{1:d}".format(*self.connection.version))

@@ -1025,6 +1025,7 @@ class TVShow(object):
             ["DELETE FROM indexer_mapping WHERE indexer_id = ?", [self.indexerid]],
             ["DELETE FROM blacklist WHERE show_id = ?", [self.indexerid]],
             ["DELETE FROM whitelist WHERE show_id = ?", [self.indexerid]],
+            ["DELETE FROM pending_downloads WHERE showid = ?", [self.indexerid]],
         ]
 
         main_db_con.mass_action(sql_l)
@@ -1970,7 +1971,12 @@ class TVEpisode(object):
         # delete myself from the DB
         logger.debug(_("Deleting myself from the database"))
         main_db_con = db.DBConnection()
-        main_db_con.action("DELETE FROM tv_episodes WHERE showid = ? AND season = ? AND episode = ?", [self.show.indexerid, self.season, self.episode])
+        main_db_con.mass_action(
+            [
+                ["DELETE FROM tv_episodes WHERE showid = ? AND season = ? AND episode = ?", [self.show.indexerid, self.season, self.episode]],
+                ["DELETE FROM pending_downloads WHERE showid = ? AND season = ? AND episode = ?", [self.show.indexerid, self.season, self.episode]],
+            ]
+        )
         raise EpisodeDeletedException()
 
     def get_sql(self):

@@ -20,6 +20,34 @@ def get_proxy(https: bool, host: str, username: str, password: str, verify: bool
     return xmlrpc.client.ServerProxy(f"{scheme}://{username}:{password}@{host}/xmlrpc", context=make_context(verify))
 
 
+def get_job_states(client_ids):
+    """
+    Ask nzbget what became of the given jobs.
+
+    :param client_ids: NZBIDs, as strings.
+    :return: {nzbid: "queued" | "Completed" | "Failed" | <nzbget's own status>}. Unknown ids are absent.
+    :raise: ValueError when nzbget cannot be reached. Never guess.
+    """
+    try:
+        proxy = get_proxy(settings.NZBGET_USE_HTTPS, settings.NZBGET_HOST, settings.NZBGET_USERNAME, settings.NZBGET_PASSWORD, settings.SSL_VERIFY)
+
+        states = {str(group["NZBID"]): "queued" for group in proxy.listgroups(0)}
+
+        wanted = set(client_ids) - set(states)
+        if wanted:
+            for entry in proxy.history(False):
+                nzbid = str(entry.get("NZBID"))
+                if nzbid not in wanted:
+                    continue
+                # nzbget reports e.g. "SUCCESS/ALL", "FAILURE/PAR", "DELETED/MANUAL". Only the family matters.
+                family = str(entry.get("Status") or "").split("/")[0]
+                states[nzbid] = {"SUCCESS": "Completed", "FAILURE": "Failed"}.get(family, family)
+
+        return states
+    except Exception as error:
+        raise ValueError(f"Could not ask nzbget about its jobs: {error}")
+
+
 def send_nzb(result: "SearchResult", proper=False) -> bool:
     """
     Sends NZB to NZBGet client
@@ -130,20 +158,22 @@ def send_nzb(result: "SearchResult", proper=False) -> bool:
         # also the return value has changed from boolean to integer
         # (Positive number representing NZBID of the queue item. 0 and negative numbers represent error codes.)
         elif nzbget_version >= 13:
-            nzbget_result = (
-                proxy.append(
-                    f"{result.name}.nzb",
-                    nzb_data_content if nzb_data_content is not None else result.url,
-                    category,
-                    nzbget_priority,
-                    False,
-                    False,
-                    dupe_key,
-                    dupe_score,
-                    "score",
-                )
-                > 0
+            nzbid = proxy.append(
+                f"{result.name}.nzb",
+                nzb_data_content if nzb_data_content is not None else result.url,
+                category,
+                nzbget_priority,
+                False,
+                False,
+                dupe_key,
+                dupe_score,
+                "score",
             )
+            nzbget_result = nzbid > 0
+            if nzbget_result:
+                # Keep the NZBID so the download can be reconciled against nzbget's history later.
+                # Older versions return a bool, so those downloads stay untracked.
+                result.client_id = str(nzbid)
         else:
             if nzb_data_content is not None:
                 nzbget_result = proxy.append(f"{result.name}.nzb", category, nzbget_priority, False, nzb_data_content)

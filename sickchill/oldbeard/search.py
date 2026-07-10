@@ -2,6 +2,7 @@ import datetime
 import os
 import re
 import threading
+import time
 import traceback
 from typing import TYPE_CHECKING
 
@@ -99,6 +100,92 @@ def _download_result(result: "SearchResult"):
     return result_was_downloaded
 
 
+SNATCHED_STATUSES = (SNATCHED, SNATCHED_PROPER, SNATCHED_BEST, common.FAILED)
+
+# Carrying old_status forward matters for a failed upgrade: an episode that was DOWNLOADED, snatched for a
+# better release, and left stranded when that release died is snatched again with a pre-snatch status of
+# SNATCHED_BEST. Overwriting old_status with that would revert it to WANTED on the next failure and
+# re-download a file already on disk.
+PENDING_DOWNLOAD_UPSERT = (
+    "INSERT INTO pending_downloads "
+    "(showid, season, episode, client_id, client, release_name, provider, size, old_status, "
+    " state, snatch_time, state_time, absent_count, enqueue_count, warned) "
+    "VALUES (?,?,?,?,?,?,?,?,?, 'pending', ?, ?, 0, 0, 0) "
+    "ON CONFLICT(showid, season, episode) DO UPDATE SET "
+    " client_id = excluded.client_id, client = excluded.client, release_name = excluded.release_name, "
+    " provider = excluded.provider, size = excluded.size, "
+    " old_status = CASE WHEN ? = 1 THEN pending_downloads.old_status ELSE excluded.old_status END, "
+    " state = 'pending', snatch_time = excluded.snatch_time, state_time = excluded.state_time, "
+    " absent_count = 0, enqueue_count = 0, warned = 0"
+)
+
+# Stamped on an episode snatched by a client that reports no job id: torrents, blackhole, nzbget < 13, or a
+# client that simply did not answer with one. It has to be distinguishable from None, which means "this
+# process has never snatched this episode" -- an episode object freshly loaded from the database after a
+# restart carries no stamp at all, and must not be mistaken for one that was re-snatched out from under us.
+UNTRACKED_SNATCH = ""
+
+
+def _tracked_client_id(result: "SearchResult", episode_object):
+    """The job currently tracked for this episode, or None if it is not tracked.
+
+    Must be read while holding episode_object.lock, and its delete committed before releasing it. A concurrent
+    snatch of the same episode cannot then be between its stamp and its own commit, so whatever this reads is
+    the job being superseded and never the job of a snatch about to overtake us.
+    """
+    row = db.DBConnection().select_one(
+        "SELECT client_id FROM pending_downloads WHERE showid = ? AND season = ? AND episode = ?",
+        [result.show.indexerid, episode_object.season, episode_object.episode],
+    )
+    return row["client_id"] if row else None
+
+
+def _forget_pending_download_sql(result: "SearchResult", episode_object, superseded_client_id):
+    """Stop tracking the download this episode had, because a snatch we cannot follow has replaced it.
+
+    A torrent or blackhole snatch reports no job id, so it writes no row of its own -- but it still supersedes
+    the download before it. Left behind, the old row has the reconciler go on asking the client about a job
+    whose episode something else is now downloading, and eventually fail that healthy download in its place.
+
+    Scoped to the job it supersedes, never to the episode. flush_episodes() can replace an episode's cached
+    object, and two snatches then hold two different locks for one episode. Naming the job means the worst such
+    a race can do is delete nothing.
+    """
+    return [
+        "DELETE FROM pending_downloads WHERE showid = ? AND season = ? AND episode = ? AND client_id = ?",
+        [result.show.indexerid, episode_object.season, episode_object.episode, superseded_client_id],
+    ]
+
+
+def _pending_download_sql(result: "SearchResult", episode_object, prior_status, now):
+    """Build the pending_downloads row for one episode of a snatched result.
+
+    Returned rather than executed so it joins the per-episode mass_action snatch_episode runs inside the
+    episode lock: the row and the episode's SNATCHED status must commit together, or a crash between them
+    leaves a tracked download whose episode the database still calls WANTED.
+    """
+    prior_base = Quality.splitCompositeStatus(prior_status)[0]
+    carry_forward = 1 if prior_base in SNATCHED_STATUSES else 0
+
+    return [
+        PENDING_DOWNLOAD_UPSERT,
+        [
+            result.show.indexerid,
+            episode_object.season,
+            episode_object.episode,
+            result.client_id,
+            settings.NZB_METHOD,
+            result.name,
+            result.provider.name,
+            result.size,
+            prior_status,
+            now,
+            now,
+            carry_forward,
+        ],
+    ]
+
+
 def snatch_episode(result: "SearchResult", end_status=SNATCHED):
     """
     Contains the internal logic necessary to actually "snatch" a result that
@@ -165,16 +252,42 @@ def snatch_episode(result: "SearchResult", end_status=SNATCHED):
     History().log_snatch(result)
 
     # don't notify when we re-download an episode
-    sql_l = []
     trakt_data = []
+    now = int(time.time())
+    track = bool(settings.USE_FAILED_DOWNLOADS and result.client_id)
     for current_episode in result.episodes:
         with current_episode.lock:
+            prior_status = current_episode.status
+
             if is_first_best_match(result):
                 current_episode.status = Quality.compositeStatus(SNATCHED_BEST, result.quality)
             else:
                 current_episode.status = Quality.compositeStatus(end_status, result.quality)
 
-            sql_l.append(current_episode.get_sql())
+            # Stamped in the same critical section as the status so mark_failed can compare the two under
+            # one lock. Without that, a download_status retry for an older job could look up this episode,
+            # see an ordinary snatched status belonging to *this* job, and fail it.
+            current_episode.snatch_client_id = result.client_id if track else UNTRACKED_SNATCH
+
+            statements = [current_episode.get_sql()]
+            if track:
+                statements.append(_pending_download_sql(result, current_episode, prior_status, now))
+            else:
+                superseded_client_id = _tracked_client_id(result, current_episode)
+                if superseded_client_id is not None:
+                    statements.append(_forget_pending_download_sql(result, current_episode, superseded_client_id))
+
+            # Committed here, inside the lock, and never queued for a later mass_action.
+            #
+            # The stamp above is ordered by this lock; a queued statement is ordered by whenever its commit
+            # happens to run, and the two orders can disagree. A tracked snatch that stamped first but
+            # committed second would leave pending_downloads naming its job while the stamp named the
+            # untracked snatch that overtook it -- and after a restart, when the stamp is gone, the reconciler
+            # would act on that row and revert an episode whose download is healthy. Writing both under the
+            # lock is what makes the stamp and the row incapable of disagreeing.
+            statements = [statement for statement in statements if statement]
+            if statements:
+                db.DBConnection().mass_action(statements)
 
         if current_episode.status not in Quality.DOWNLOADED:
             # noinspection PyBroadException
@@ -193,10 +306,6 @@ def snatch_episode(result: "SearchResult", end_status=SNATCHED):
         logger.debug(f"Add episodes, showid: indexerid {result.show.indexerid}, Title {result.show.name} to Traktv Watchlist")
         if data:
             notifiers.trakt_notifier.update_watchlist(result.show, data_episode=data, update="add")
-
-    if sql_l:
-        main_db_con = db.DBConnection()
-        main_db_con.mass_action(sql_l)
 
     return True
 
