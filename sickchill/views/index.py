@@ -364,15 +364,12 @@ class UI(WebRoot):
     def locale_json(self):
         lang = self.get_query_argument("lang")
         """ Get /locale/{lang_code}/LC_MESSAGES/messages.json """
-        locale_file = os.path.realpath(f"{locale_dir}/{lang}/LC_MESSAGES/messages.json")
-
-        # lang comes from the request: make sure the resolved path (symlinks followed,
-        # case normalized for Windows) cannot escape the locale directory
+        # lang comes from the request: resolve the full path (symlinks followed) and
+        # refuse anything that escapes the locale directory. Both sides derive from
+        # the same locale_dir constant, so the prefix comparison cannot mis-reject.
         locale_base = os.path.realpath(str(locale_dir))
-        try:
-            contained = os.path.commonpath([os.path.normcase(locale_file), os.path.normcase(locale_base)]) == os.path.normcase(locale_base)
-        except ValueError:
-            contained = False
+        locale_file = os.path.realpath(os.path.join(locale_base, lang, "LC_MESSAGES", "messages.json"))
+        contained = locale_file.startswith(locale_base + os.sep)
 
         if contained and os.path.isfile(locale_file):
             self.set_header("Content-Type", "application/json")
