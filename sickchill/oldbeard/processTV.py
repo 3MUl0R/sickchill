@@ -803,10 +803,12 @@ def process_failed(process_path, release_name, result):
         return
 
     processor = None
+    deferred = False
 
     try:
         processor = failedProcessor.FailedProcessor(process_path, release_name)
         result.result = processor.process()
+        deferred = processor.deferred
         process_fail_message = ""
     except FailedPostProcessingFailedException as error:
         result.result = False
@@ -815,11 +817,51 @@ def process_failed(process_path, release_name, result):
     if processor:
         result.output += processor.log
 
+    if process_fail_message and remove_empty_failed_marker_dir(process_path, release_name, result):
+        result.output += log_helper(f"Failed Download Processing succeeded: ({release_name}, {process_path})")
+        return
+
     if settings.DELETE_FAILED and result.result:
         if delete_folder(process_path, check_empty=False):
             result.output += log_helper(f"Deleted folder: {process_path}", logger.DEBUG)
 
     if result.result:
         result.output += log_helper(f"Failed Download Processing succeeded: ({release_name}, {process_path})")
+    elif deferred:
+        # Not a failure: the download status checker is tracking this download and will block and
+        # retry it itself. The folder stays until the checker has resolved the episode; the pass
+        # after that resolves it as stale litter and the DELETE_FAILED gate above cleans it up.
+        result.output += log_helper(f"Failed download {process_path} is tracked by the download status checker; leaving the folder to it")
     else:
         result.output += log_helper(f"Failed Download Processing failed: ({release_name}, {process_path}): {process_fail_message}", logger.WARNING)
+
+
+def remove_empty_failed_marker_dir(process_path, release_name, result):
+    """
+    Last resort for the litter SAB leaves behind: it pre-creates the job's destination folder in the
+    completed dir and renames it `_FAILED_<jobname>` when post-processing fails, so the folder is
+    usually empty and its name is often unparseable. Every pass over it would warn forever.
+
+    Only a recognized marker folder is touched, only when no explicit release name was given (an
+    external script's signal is never consumed here), only when the operator allows deletions at all,
+    never the download root itself, and only via the non-recursive os.rmdir -- a folder holding, or
+    concurrently gaining, ANY content survives untouched.
+    """
+    if release_name or not settings.DELETE_FAILED:
+        return False
+
+    upper_name = os.path.basename(process_path).upper()
+    if not (upper_name.startswith(("_FAILED_", "_UNDERSIZED_")) or upper_name.endswith(("_FAILED_", "_UNDERSIZED_"))):
+        return False
+
+    if settings.TV_DOWNLOAD_DIR and str(Path(process_path).resolve()) == str(Path(settings.TV_DOWNLOAD_DIR).resolve()):
+        return False
+
+    try:
+        os.rmdir(process_path)
+    except OSError:
+        return False
+
+    result.result = True
+    result.output += log_helper(f"Removed the empty failed-download folder: {process_path}")
+    return True

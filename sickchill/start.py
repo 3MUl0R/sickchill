@@ -766,6 +766,7 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
             check_setting_int(settings.CFG, "FailedDownloads", "failed_download_row_max_age_days", settings.FAILED_DOWNLOAD_ROW_MAX_AGE_DAYS),
         )
         settings.FAILED_DOWNLOAD_MAX_ENQUEUES = max(1, check_setting_int(settings.CFG, "FailedDownloads", "failed_download_max_enqueues", settings.FAILED_DOWNLOAD_MAX_ENQUEUES))
+        settings.FAILED_DOWNLOAD_CLIENT_CLEANUP = check_setting_bool(settings.CFG, "FailedDownloads", "failed_download_client_cleanup")
 
         settings.BACKLOG_MISSING_ONLY = check_setting_bool(settings.CFG, "General", "backlog_missing_only")
 
@@ -1793,6 +1794,7 @@ def save_config():
                 "failed_download_row_ttl_days": int(settings.FAILED_DOWNLOAD_ROW_TTL_DAYS),
                 "failed_download_row_max_age_days": int(settings.FAILED_DOWNLOAD_ROW_MAX_AGE_DAYS),
                 "failed_download_max_enqueues": int(settings.FAILED_DOWNLOAD_MAX_ENQUEUES),
+                "failed_download_client_cleanup": int(settings.FAILED_DOWNLOAD_CLIENT_CLEANUP),
             },
             "ANIDB": {
                 "use_anidb": int(settings.USE_ANIDB),

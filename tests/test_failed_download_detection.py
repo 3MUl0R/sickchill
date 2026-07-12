@@ -365,6 +365,33 @@ class SabTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     sab._api_call({"mode": "queue"})
 
+    def test_delete_history_item_deletes_files_and_skips_the_archive(self):
+        """Without archive=0, SAB >= 4.2 shelves the entry instead of deleting it, and without
+        del_files=1 the _FAILED_ folder this exists to remove stays on disk."""
+        sab = sab_module()
+        with mock.patch.object(sab.helpers, "getURL", return_value={"status": True}) as get_url:
+            self.assertTrue(sab.delete_history_item("nzo-1"))
+
+        params = get_url.call_args.kwargs["params"]
+        self.assertEqual(params["mode"], "history")
+        self.assertEqual(params["name"], "delete")
+        self.assertEqual(params["value"], "nzo-1")
+        self.assertEqual(params["del_files"], 1)
+        self.assertEqual(params["archive"], 0)
+
+    def test_delete_history_item_reports_a_declined_delete(self):
+        sab = sab_module()
+        with mock.patch.object(sab.helpers, "getURL", return_value={"status": False}):
+            self.assertFalse(sab.delete_history_item("nzo-1"))
+
+    def test_delete_history_item_never_raises(self):
+        sab = sab_module()
+        for body in (None, "nonsense", {"error": "API Key Incorrect"}):
+            with mock.patch.object(sab.helpers, "getURL", return_value=body):
+                self.assertFalse(sab.delete_history_item("nzo-1"))
+        with mock.patch.object(sab.helpers, "getURL", side_effect=OSError("connection torn down")):
+            self.assertFalse(sab.delete_history_item("nzo-1"))
+
 
 def sab_module():
     from sickchill.oldbeard import sab
@@ -394,6 +421,28 @@ class NzbgetTest(unittest.TestCase):
         with mock.patch.object(nzbget, "get_proxy", side_effect=OSError("no route to host")):
             with self.assertRaises(ValueError):
                 nzbget.get_job_states(["1"])
+
+    def test_delete_history_item_uses_the_modern_signature(self):
+        from sickchill.oldbeard import nzbget
+
+        proxy = mock.Mock()
+        proxy.editqueue.return_value = True
+        with mock.patch.object(nzbget, "get_proxy", return_value=proxy):
+            self.assertTrue(nzbget.delete_history_item("42"))
+
+        proxy.editqueue.assert_called_once_with("HistoryFinalDelete", "", [42])
+
+    def test_delete_history_item_never_raises(self):
+        from sickchill.oldbeard import nzbget
+
+        with mock.patch.object(nzbget, "get_proxy", side_effect=OSError("no route to host")):
+            self.assertFalse(nzbget.delete_history_item("42"))
+        # A pre-modern nzbget rejects the 3-argument signature with a Fault; that is a skipped
+        # cleanup, not an error.
+        proxy = mock.Mock()
+        proxy.editqueue.side_effect = Exception("Invalid parameter")
+        with mock.patch.object(nzbget, "get_proxy", return_value=proxy):
+            self.assertFalse(nzbget.delete_history_item("42"))
 
 
 class IsEpisodeInQueueTest(unittest.TestCase):
@@ -878,10 +927,36 @@ class HistoryDatabaseTest(conftest.SickChillTestPostProcessorCase):
         self.assertEqual(self.failed_db.select("SELECT * FROM failed"), [])
 
     def test_an_untracked_snatch_can_still_be_failed_by_a_caller_with_no_token(self):
-        """failedProcessor and the UI pass no client_id. They must still be able to fail a torrent."""
+        """The UI's retry passes no client_id (and is not anonymous -- the user is pointing at THIS
+        episode deliberately). It must still be able to fail a torrent."""
         self._set_status(composite(SNATCHED_BEST))
         self.episode.snatch_client_id = search.UNTRACKED_SNATCH
         self.assertTrue(self.history.mark_failed(self.episode, release="A.Release", provider="NZBGeek", size=42))
+
+    def test_anonymous_mark_failed_declines_when_any_snatch_is_stamped(self):
+        """A _FAILED_ folder names some old job, but this process has since snatched the episode. The
+        folder cannot tell its own download from the newer one, so it must not fail anyone's."""
+        self._set_status(composite(SNATCHED_BEST))
+        self.episode.snatch_client_id = "job-b"
+        self.assertFalse(self.history.mark_failed(self.episode, release="A.Release", anonymous=True))
+        self.assertEqual(self._stored_status(), composite(SNATCHED_BEST))
+        self.assertEqual(self.failed_db.select("SELECT * FROM failed"), [])
+
+    def test_anonymous_mark_failed_declines_on_an_untracked_stamp(self):
+        """The torrent case a client_id-carrying caller cannot even express: the newer snatch is
+        stamped "", which compares unequal to nothing. Anonymous callers decline on any stamp at all."""
+        self._set_status(composite(SNATCHED))
+        self.episode.snatch_client_id = search.UNTRACKED_SNATCH
+        self.assertFalse(self.history.mark_failed(self.episode, release="A.Release", anonymous=True))
+        self.assertEqual(self._stored_status(), composite(SNATCHED))
+
+    def test_anonymous_mark_failed_proceeds_after_a_restart(self):
+        """No stamp and a snatched status: memory has no evidence either way, and the durable layer for
+        the restart case is FailedProcessor's pending-row check, not this one."""
+        self._set_status(composite(SNATCHED))
+        self.assertFalse(hasattr(self.episode, "snatch_client_id"))
+        self.assertTrue(self.history.mark_failed(self.episode, release="A.Release", anonymous=True))
+        self.assertEqual(self._stored_status(), WANTED)
 
     def test_mark_failed_reports_failure_when_the_revert_declines(self):
         """mark_failed's answer is what its caller uses to decide whether to search. Reporting success on an
@@ -1110,6 +1185,95 @@ class EnqueueTest(unittest.TestCase):
         self.assertIn("DELETE", query)
         self.assertIn("client_id = ?", query)
         self.assertIn("job-a", args)
+
+
+class ClientCleanupTest(unittest.TestCase):
+    """Deleting a failed job out of the download client is destructive, so every guard earns a test."""
+
+    def setUp(self):
+        settings.NZB_METHOD = "sabnzbd"
+        settings.FAILED_DOWNLOAD_POLL_FREQUENCY = 5
+        settings.FAILED_DOWNLOAD_CLIENT_CLEANUP = True
+        self.updater = download_status.DownloadStatusUpdater()
+        self.con = mock.Mock()
+
+    def tearDown(self):
+        settings.FAILED_DOWNLOAD_CLIENT_CLEANUP = False
+
+    def _cleanup(self, rows, states, now=100000):
+        self.con.select.return_value = rows
+        from sickchill.oldbeard import sab
+
+        with mock.patch.object(sab, "delete_history_item", return_value=True) as delete:
+            self.updater._cleanup_client_jobs(self.con, states, now)
+        return delete
+
+    @staticmethod
+    def _row(state="failing", snatch_time=0):
+        return {"state": state, "snatch_time": snatch_time}
+
+    def test_a_fully_failing_job_is_deleted_exactly_once(self):
+        delete = self._cleanup([self._row(), self._row()], {"job-a": "Failed"})
+        delete.assert_called_once_with("job-a")
+
+    def test_a_sibling_row_that_is_not_yet_failing_defers_the_delete(self):
+        """Season packs share one client id across rows; deleting after the first row would strand the
+        rest in the absent path."""
+        delete = self._cleanup([self._row(), self._row(state="completed")], {"job-a": "Failed"})
+        delete.assert_not_called()
+
+    def test_only_jobs_the_client_calls_failed_are_touched(self):
+        """A vanished job is not in states at all, and a queued or completed one must never be deleted."""
+        delete = self._cleanup([self._row()], {"job-a": "queued", "job-b": "Completed"})
+        delete.assert_not_called()
+
+    def test_a_freshly_snatched_job_is_left_for_the_next_cycle(self):
+        """snatch_episode registers a pack's rows one transaction at a time; a job younger than a poll
+        interval may not have all its rows yet."""
+        now = 100000
+        fresh = now - settings.FAILED_DOWNLOAD_POLL_FREQUENCY * 60 + 10
+        delete = self._cleanup([self._row(snatch_time=fresh)], {"job-a": "Failed"})
+        delete.assert_not_called()
+
+    def test_a_failed_job_with_no_rows_left_is_still_cleaned(self):
+        """The rows resolved or hit the give-up path mid-cycle; the client still holds a failed job
+        nobody owns."""
+        delete = self._cleanup([], {"job-a": "Failed"})
+        delete.assert_called_once_with("job-a")
+
+    def test_a_failing_delete_call_does_not_take_the_cycle_down(self):
+        self.con.select.return_value = [self._row()]
+        from sickchill.oldbeard import sab
+
+        with mock.patch.object(sab, "delete_history_item", side_effect=OSError("boom")):
+            self.updater._cleanup_client_jobs(self.con, {"job-a": "Failed"}, 100000)
+
+    def test_reconcile_honors_the_cleanup_setting(self):
+        row = {
+            "showid": 1,
+            "season": 2,
+            "episode": 3,
+            "client_id": "job-a",
+            "client": "sabnzbd",
+            "release_name": "Some.Release",
+            "state": "pending",
+        }
+        from sickchill.oldbeard import sab
+
+        with mock.patch.object(download_status.db, "DBConnection") as dbc:
+            dbc.return_value.select.return_value = [row]
+            with mock.patch.object(self.updater, "_resolve_safely", return_value=False):
+                with mock.patch.object(self.updater, "_classify", return_value=False):
+                    with mock.patch.object(self.updater, "_enqueue"):
+                        with mock.patch.object(sab, "get_job_states", return_value={}):
+                            with mock.patch.object(self.updater, "_cleanup_client_jobs") as cleanup:
+                                settings.FAILED_DOWNLOAD_CLIENT_CLEANUP = False
+                                self.updater._reconcile()
+                                cleanup.assert_not_called()
+
+                                settings.FAILED_DOWNLOAD_CLIENT_CLEANUP = True
+                                self.updater._reconcile()
+                                cleanup.assert_called_once()
 
 
 class LifecycleTest(conftest.SickChillTestPostProcessorCase):

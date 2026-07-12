@@ -610,6 +610,10 @@ FAILED_DOWNLOAD_ROW_TTL_DAYS = 14
 FAILED_DOWNLOAD_ROW_MAX_AGE_DAYS = 60
 # Give up retrying a failed download after this many attempts.
 FAILED_DOWNLOAD_MAX_ENQUEUES = 3
+# Delete a job from the download client (with its files, including SAB's _FAILED_ folder in the completed
+# dir) once the client has declared it Failed and every episode of the job has been handed to retry.
+# Destructive, so opt-in: the files are the client's failed remnants, but they are files.
+FAILED_DOWNLOAD_CLIENT_CLEANUP = False
 USE_FREE_SPACE_CHECK = True
 USE_FREEMOBILE = False
 USE_GOTIFY = False

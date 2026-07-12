@@ -416,7 +416,15 @@ class History(object, metaclass=Singleton):
         return True
 
     def mark_failed(
-        self, episode_object: "TVEpisode", release: str = None, provider: str = None, size: int = None, old_status=None, client_id=None, force=False
+        self,
+        episode_object: "TVEpisode",
+        release: str = None,
+        provider: str = None,
+        size: int = None,
+        old_status=None,
+        client_id=None,
+        force=False,
+        anonymous=False,
     ):
         """
         Mark an episode_object as failed: block the release, then restore the episode's previous status.
@@ -430,6 +438,11 @@ class History(object, metaclass=Singleton):
             the newer job would abandon a healthy download.
         :param force: skip the status check. For the Retry button, which is a deliberate user action on an
             episode that may already be downloaded.
+        :param anonymous: this failure carries no job identity at all -- it was inferred from a leftover
+            `_FAILED_` folder. Such a caller cannot tell its own download from a newer one, so it must
+            decline whenever ANY snatch is stamped on the episode, including the untracked "" stamp a
+            torrent or blackhole snatch leaves. Checked under the episode lock, so a snatch that lands
+            after the caller's own pre-checks still declines here.
         :return: True when the episode was marked and reverted, False when a guard declined. Callers must not
             search for an episode this declined: it belongs to a newer download, and searching would snatch
             over the top of one that is working.
@@ -456,6 +469,12 @@ class History(object, metaclass=Singleton):
                 stamped = getattr(episode_object, "snatch_client_id", None)
                 if client_id and stamped is not None and stamped != client_id:
                     logger.info(f"Not failing {episode_object.pretty_name}, it has been snatched again since this download failed")
+                    return False
+
+                if anonymous and stamped is not None:
+                    # A folder-derived failure cannot prove the stamped snatch is its own download rather
+                    # than a newer one, and guessing wrong abandons a working download.
+                    logger.info(f"Not failing {episode_object.pretty_name}, this process has snatched it and a stale folder cannot claim that download")
                     return False
 
                 status, quality = Quality.splitCompositeStatus(episode_object.status)

@@ -48,6 +48,25 @@ def get_job_states(client_ids):
         raise ValueError(f"Could not ask nzbget about its jobs: {error}")
 
 
+def delete_history_item(client_id):
+    """
+    Delete a failed job's history record from nzbget (modern 3-argument editqueue signature).
+
+    nzbget takes no del-files flag here: current versions remove a FAILED download's remaining files
+    themselves when its history record is deleted. Versions old enough to reject this signature simply
+    fail the call and keep their history.
+
+    :return: True when nzbget confirmed the delete. Never raises: cleanup is best-effort and must not
+        disturb the reconciliation cycle that asked for it.
+    """
+    try:
+        proxy = get_proxy(settings.NZBGET_USE_HTTPS, settings.NZBGET_HOST, settings.NZBGET_USERNAME, settings.NZBGET_PASSWORD, settings.SSL_VERIFY)
+        return bool(proxy.editqueue("HistoryFinalDelete", "", [int(client_id)]))
+    except Exception as error:
+        logger.debug(f"Could not delete history item {client_id} from nzbget: {error}")
+        return False
+
+
 def send_nzb(result: "SearchResult", proper=False) -> bool:
     """
     Sends NZB to NZBGet client

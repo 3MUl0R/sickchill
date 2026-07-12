@@ -89,6 +89,9 @@ class DownloadStatusUpdater(object):
         if deferred > 0:
             logger.warning(f"{deferred} failed downloads deferred to the next cycle by the per-cycle cap of {MAX_FAILURES_PER_CYCLE}")
 
+        if settings.FAILED_DOWNLOAD_CLIENT_CLEANUP and module:
+            self._cleanup_client_jobs(main_db_con, states, now)
+
     def _resolve_safely(self, main_db_con, row):
         """_resolve, but one unhappy row cannot take the whole cycle down with it.
 
@@ -243,6 +246,46 @@ class DownloadStatusUpdater(object):
             if segment:
                 logger.info(f"Retrying {len(segment)} failed download(s) for {show.name} season {season}")
                 settings.searchQueueScheduler.action.add_item(search_queue.FailedQueueItem(show, segment, failed_releases=failed_releases))
+
+    def _cleanup_client_jobs(self, main_db_con, states, now):
+        """Delete client-declared-failed jobs from the download client, files included.
+
+        This is what stops SAB littering the completed dir: when a job fails post-processing, SAB
+        leaves an (almost always empty) `_FAILED_<jobname>` folder there, and nothing ever removes
+        it. Deleting the job through the API removes its history entry, its incomplete leftovers, and
+        that folder in one call.
+
+        Destructive, so opt-in (FAILED_DOWNLOAD_CLIENT_CLEANUP) and triple-guarded:
+        - the client must report the job "Failed" THIS cycle -- never a job that merely vanished, and
+          never one the client still calls queued or completed;
+        - every pending row for the job must be durably 'failing'. Season packs share one client id
+          across rows, and deleting after the first row would strand the siblings in the absent path;
+        - the newest row must be older than one poll interval, so a pack whose rows are still being
+          registered by snatch_episode's loop can never lose its job.
+
+        Best-effort: a failed delete retries on later cycles while the rows remain failing, and once
+        they are gone the failed-folder processing path resolves any filesystem residue.
+        """
+        module = CLIENTS.get(settings.NZB_METHOD)
+        if not module:
+            return
+
+        for client_id in sorted(client_id for client_id, state in states.items() if state == "Failed"):
+            try:
+                rows = main_db_con.select(
+                    "SELECT state, snatch_time FROM pending_downloads WHERE client = ? AND client_id = ?",
+                    [settings.NZB_METHOD, client_id],
+                )
+                if any(row["state"] != "failing" for row in rows):
+                    continue
+                if rows:
+                    newest = max(int(row["snatch_time"] or 0) for row in rows)
+                    if now - newest < settings.FAILED_DOWNLOAD_POLL_FREQUENCY * 60:
+                        continue
+                if module.delete_history_item(client_id):
+                    logger.info(f"Removed the failed job {client_id} from {settings.NZB_METHOD}, files included")
+            except Exception as error:
+                logger.debug(f"Could not clean the failed job {client_id} out of {settings.NZB_METHOD}, will try again next cycle: {error}")
 
     def _backstop(self, main_db_con, row, now):
         """The ceiling for a row the client will not account for. Never fails the episode; only stops tracking.

@@ -101,6 +101,28 @@ def get_job_states(client_ids):
     return states
 
 
+def delete_history_item(client_id):
+    """
+    Remove a failed job from SAB's history together with its files -- the incomplete leftovers and the
+    `_FAILED_` folder SAB leaves in the completed directory when post-processing fails.
+
+    archive=0 matters: SAB >= 4.2 otherwise moves the entry to its archive instead of deleting it.
+    Idempotent on SAB's side (deleting an unknown id answers {"status": true}, verified against 5.0.4).
+
+    :return: True when SAB confirmed the delete. Never raises: cleanup is best-effort and must not
+        disturb the reconciliation cycle that asked for it.
+    """
+    try:
+        jdata = _api_call({"mode": "history", "name": "delete", "value": client_id, "del_files": 1, "archive": 0})
+        if not jdata.get("status"):
+            logger.debug(f"SAB declined to delete history item {client_id}: {jdata}")
+            return False
+        return True
+    except Exception as error:
+        logger.debug(f"Could not delete history item {client_id} from SAB: {error}")
+        return False
+
+
 def _api_call(params):
     """Call the SAB api and return the parsed body, raising rather than returning junk on any problem."""
     params = dict(params, output="json")
