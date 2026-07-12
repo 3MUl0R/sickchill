@@ -3291,11 +3291,12 @@ const SICKCHILL = {
     manage: {
         init() {
             $.makeEpisodeRow = function (indexerId, season, episode, name, checked) { // eslint-disable-line max-params
+                const escapedId = $('<div>').text(indexerId).html();
                 let row = '';
-                row += ' <tr class="' + $('#row_class').val() + ' show-' + indexerId + '">';
-                row += '  <td class="tableleft" align="center"><input type="checkbox" class="' + indexerId + '-epcheck" name="' + indexerId + '-' + season + 'x' + episode + '"' + (checked ? ' checked' : '') + '></td>';
+                row += ' <tr class="' + $('<div>').text($('#row_class').val()).html() + ' show-' + escapedId + '">';
+                row += '  <td class="tableleft" align="center"><input type="checkbox" class="' + escapedId + '-epcheck" name="' + escapedId + '-' + season + 'x' + episode + '"' + (checked ? ' checked' : '') + '></td>';
                 row += '  <td>' + season + 'x' + episode + '</td>';
-                row += '  <td class="tableright" style="width: 100%">' + name + '</td>';
+                row += '  <td class="tableright" style="width: 100%">' + $('<div>').text(name).html() + '</td>';
                 row += ' </tr>';
 
                 return row;
@@ -3520,7 +3521,7 @@ const SICKCHILL = {
 
             $('.new_root_dir').on('change', function () {
                 const currentIndex = findDirectoryIndex($(this).attr('id'));
-                $('#display_new_root_dir_' + currentIndex).html('<b>' + $(this).val() + '</b>');
+                $('#display_new_root_dir_' + currentIndex).html('<b>' + $('<div>').text($(this).val()).html() + '</b>');
             });
 
             $('.edit_root_dir').on('click', function () {
@@ -4122,14 +4123,14 @@ const SICKCHILL = {
                     $.post(scRoot + '/addShows/sanitizeFileName', {name: object.showName}, data => {
                         $('#desc-show-name').text(object.showName);
                         if (object.dir === $('#fullShowPath').val()) {
-                            $('#desc-directory-name').html(object.dir);
+                            $('#desc-directory-name').text(object.dir);
                         } else {
-                            $('#desc-directory-name').html(object.dir + data + object.sepChar);
+                            $('#desc-directory-name').text(object.dir + data + object.sepChar);
                         }
                     });
                 } else { // If not then it's unknown
                     $('#desc-show-name').text(object.showName);
-                    $('#desc-directory-name').html(object.dir);
+                    $('#desc-directory-name').text(object.dir);
                 }
 
                 $('#desc-quality-name').text($('#qualityPreset option:selected').text());
@@ -4211,7 +4212,7 @@ const SICKCHILL = {
 
                 const searchingFor = _($('#show-name').val().trim() + ' on ' + $('#providedIndexer option:selected').text() + ' in ' + $('#indexerLangSelect option:selected').text());
                 $('#searchResults').empty().html('<img id="searchingAnim" src="' + scRoot + '/images/loading32' + themeSpinner + '.gif" alt="loading" height="32" width="32" /> '
-                    + _('searching {searchingFor}...').replace(/{searchingFor}/, searchingFor));
+                    + _('searching {searchingFor}...').replace(/{searchingFor}/, $('<div>').text(searchingFor).html()));
 
                 searchRequestXhr = $.post({
                     url: scRoot + '/addShows/searchIndexersForShowName',
@@ -4385,7 +4386,11 @@ const SICKCHILL = {
 
                 $('#rootDirStaticList').html('');
                 $('#rootDirs option').each((i, w) => {
-                    $('#rootDirStaticList').append('<li class="ui-state-default ui-corner-all"><input type="checkbox" class="cb dir_check" id="' + $(w).val() + '" checked=checked> <label for="' + $(w).val() + '">' + $(w).val() + '</label></li>');
+                    const rootDir = $(w).val();
+                    const item = $('<li class="ui-state-default ui-corner-all"><input type="checkbox" class="cb dir_check" checked=checked> <label></label></li>');
+                    item.find('input').attr('id', rootDir);
+                    item.find('label').attr('for', rootDir).text(rootDir);
+                    $('#rootDirStaticList').append(item);
                 });
                 loadContent();
             };

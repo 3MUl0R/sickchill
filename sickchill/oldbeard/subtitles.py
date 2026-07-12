@@ -15,7 +15,6 @@ from sickchill import logger, settings
 from sickchill.helper.common import dateTimeFormat, episode_num, is_media_file
 from sickchill.oldbeard import db
 from sickchill.oldbeard.common import Quality
-from sickchill.show.History import History
 from sickchill.show.Show import Show
 
 # https://github.com/Diaoul/subliminal/issues/536
@@ -186,6 +185,9 @@ def code_from_code(code):
 
 
 def download_subtitles(episode, force_lang=None):
+    # Deferred import: sickchill.show.History and this module import each other (cyclic import).
+    from sickchill.show.History import History
+
     existing_subtitles = episode.subtitles
 
     if not needs_subtitles(existing_subtitles, force_lang):

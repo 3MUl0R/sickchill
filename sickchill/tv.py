@@ -55,7 +55,6 @@ from sickchill.oldbeard.common import (
     Quality,
     statusStrings,
 )
-from sickchill.oldbeard.name_parser.parser import InvalidNameException, InvalidShowException, NameParser
 from sickchill.show.Show import Show
 
 try:
@@ -471,6 +470,8 @@ class TVShow(object):
 
     def load_episodes_from_dir(self):
         """Find all media files in the show folder and create episodes"""
+        # deferred import: name_parser.parser imports TVShow from this module
+        from sickchill.oldbeard.name_parser.parser import InvalidNameException, InvalidShowException, NameParser
 
         if not os.path.isdir(self._location):
             logger.debug(f"{self.indexerid}: Show dir doesn't exist, not loading episodes from disk")
@@ -635,6 +636,8 @@ class TVShow(object):
 
     def make_ep_from_file(self, filepath):
         """make a TVEpisode object from a media file"""
+        # deferred import: name_parser.parser imports TVShow from this module
+        from sickchill.oldbeard.name_parser.parser import InvalidNameException, InvalidShowException, NameParser
 
         if not os.path.isfile(filepath):
             logger.info(f"{self.indexerid}: That isn't even a real file dude... {filepath}")
@@ -2221,6 +2224,8 @@ class TVEpisode(object):
 
         Returns: A dict with patterns as the keys and their replacement values as the values.
         """
+        # deferred import: name_parser.parser imports TVShow from this module
+        from sickchill.oldbeard.name_parser.parser import InvalidNameException, InvalidShowException, NameParser
 
         ep_name = self._ep_name()
 

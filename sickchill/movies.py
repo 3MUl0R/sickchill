@@ -12,13 +12,15 @@ from tmdbsimple import movies, search
 
 from sickchill import settings
 from sickchill.oldbeard.databases import movie
-from sickchill.oldbeard.db import db_cons, db_full_path, db_locks
 
 logger = logging.getLogger("sickchill.movie")
 
 
 class MovieList:
     def __init__(self):
+        # Deferred to avoid a cyclic import with sickchill.oldbeard.db; these names are only used here.
+        from sickchill.oldbeard.db import db_cons, db_full_path, db_locks
+
         tmdbsimple.API_KEY = settings.TMDB_API_KEY
 
         self.filename = "movies.db"

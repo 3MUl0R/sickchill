@@ -3,7 +3,6 @@ import logging
 import sys
 from logging import ERROR, WARNING
 
-from sickchill.helper.common import dateTimeFormat
 from sickchill.oldbeard.notifiers import notify_logged_error
 
 
@@ -100,6 +99,9 @@ class UIError(object):
     """
 
     def __init__(self, message, level):
+        # Imported here to break the cyclic import with sickchill.helper.common
+        from sickchill.helper.common import dateTimeFormat
+
         self.title = sys.exc_info()[-2] or message
         self.message = message
         self.time = datetime.datetime.now().strftime(dateTimeFormat)

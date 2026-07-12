@@ -7,8 +7,6 @@ from logging import NullHandler
 from urllib.parse import quote
 
 from sickchill import settings
-from sickchill.helper.common import dateTimeFormat
-from sickchill.logging.weblog import WebErrorViewer
 
 # log levels
 ERROR = logging.ERROR
@@ -42,6 +40,8 @@ class DispatchFormatter(logging.Formatter, object):
 
         :param record: to format
         """
+        # Deferred import: sickchill.logging.weblog transitively imports this module (cyclic import).
+        from sickchill.logging.weblog import WebErrorViewer
 
         msg = record.msg
 
@@ -118,6 +118,9 @@ class Logger(object):
         :param debug_logging: True if debug logging is enabled
         :param database_logging: True if logging database access
         """
+        # Deferred import: sickchill.helper.common transitively imports this module (cyclic import).
+        from sickchill.helper.common import dateTimeFormat
+
         self.log_file = self.log_file or os.path.join(settings.LOG_DIR, "sickchill.log")
 
         global log_file

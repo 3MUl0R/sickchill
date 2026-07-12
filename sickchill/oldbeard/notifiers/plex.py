@@ -49,7 +49,7 @@ class Notifier(object):
         password = password or settings.PLEX_CLIENT_PASSWORD
 
         return sickchill.oldbeard.notifiers.kodi_notifier._notify_kodi(
-            message, title=title, host=host, username=username, password=password, force=force, dest_app="PLEX"
+            message, title=title, hosts=host, username=username, password=password, force=force, dest_app="PLEX"
         )
 
     ##############################################################################

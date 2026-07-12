@@ -38,7 +38,7 @@ def get_file_hash(filePath: Path):
 
 def download_file(url, filename: Path):
     try:
-        r = requests.get(url, stream=True, verify=False)
+        r = requests.get(url, stream=True)
         r.raise_for_status()
         with filename.open("wb") as fp:
             for chunk in r.iter_content(chunk_size=1024):

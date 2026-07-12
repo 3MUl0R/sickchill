@@ -28,6 +28,7 @@ server.key
 /tests/*.db
 /tests/base.crt
 /tests/base.key
+/tests/show name/
 
 #  Compiled source   #
 ######################

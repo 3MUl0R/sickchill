@@ -1121,6 +1121,10 @@ class Home(WebRoot):
         banner = None
         fanart = None
         poster = None
+        # Only the web-form path reads these; pre-bound so no path can hit an unbound name.
+        blacklist = None
+        whitelist = None
+        dvdorder = False
 
         if direct_call is False:
             # Original + safe image handling
@@ -1132,20 +1136,24 @@ class Home(WebRoot):
 
             if show_id is None:
                 show_id = self.get_body_argument("show")
-                blacklist = self.get_body_argument("blacklist", default=None)
-                whitelist = self.get_body_argument("whitelist", default=None)
-                default_ep_status = self.get_body_argument("defaultEpStatus", default=None)
-                dvdorder = config.checkbox_to_value(self.get_body_argument("dvdorder", default="False"))
-                exceptions_list = self.get_body_argument("exceptions_list", default=None)
-                rls_ignore_words = self.get_body_argument("rls_ignore_words", default=None)
-                rls_prefer_words = self.get_body_argument("rls_prefer_words", default=None)
-                rls_require_words = self.get_body_argument("rls_require_words", default=None)
-                paused = config.checkbox_to_value(self.get_body_argument("paused", default="False"))
-                air_by_date = config.checkbox_to_value(self.get_body_argument("air_by_date", default="False"))
-                scene = config.checkbox_to_value(self.get_body_argument("scene", default="False"))
-                sports = config.checkbox_to_value(self.get_body_argument("sports", default="False"))
-                anime = config.checkbox_to_value(self.get_body_argument("anime", default="False"))
-                subtitles = config.checkbox_to_value(self.get_body_argument("subtitles", default="False"))
+
+            # Read the form fields regardless of whether the show id arrived in the
+            # query string or the body: a query-string id used to skip this block,
+            # leaving every one of these names unbound (guaranteed UnboundLocalError).
+            blacklist = self.get_body_argument("blacklist", default=None)
+            whitelist = self.get_body_argument("whitelist", default=None)
+            default_ep_status = self.get_body_argument("defaultEpStatus", default=None)
+            dvdorder = config.checkbox_to_value(self.get_body_argument("dvdorder", default="False"))
+            exceptions_list = self.get_body_argument("exceptions_list", default=None)
+            rls_ignore_words = self.get_body_argument("rls_ignore_words", default=None)
+            rls_prefer_words = self.get_body_argument("rls_prefer_words", default=None)
+            rls_require_words = self.get_body_argument("rls_require_words", default=None)
+            paused = config.checkbox_to_value(self.get_body_argument("paused", default="False"))
+            air_by_date = config.checkbox_to_value(self.get_body_argument("air_by_date", default="False"))
+            scene = config.checkbox_to_value(self.get_body_argument("scene", default="False"))
+            sports = config.checkbox_to_value(self.get_body_argument("sports", default="False"))
+            anime = config.checkbox_to_value(self.get_body_argument("anime", default="False"))
+            subtitles = config.checkbox_to_value(self.get_body_argument("subtitles", default="False"))
 
             # === IMAGE UPLOAD SUPPORT ===
             banner = self.get_body_argument("banner", default=None)
@@ -1179,6 +1187,9 @@ class Home(WebRoot):
 
         anidb_failed = False
 
+        # Pre-bound because static analyzers cannot prove the tuple unpacking below
+        # always binds both names (validate_indexer_id has data-dependent returns).
+        error = show_obj = None
         error, show_obj = Show.validate_indexer_id(show_id)
         if error:
             if direct_call:

@@ -158,7 +158,7 @@ class ItaSAProvider(Provider):
         params = {"apikey": self.apikey, "q": series}
 
         # make the search
-        logger.info("Searching show ids with %r", params)
+        logger.info("Searching show ids with %r", dict(params, apikey="****"))
         r = self.session.get(self.server_url + "shows/search", params=params, timeout=10)
         r.raise_for_status()
         root = ElementTree.fromstring(r.content)

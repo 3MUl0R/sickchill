@@ -4,7 +4,6 @@ Episode tagger to extract information from episodes
 
 import re
 
-from sickchill.helper.common import try_int
 from sickchill.recompiled import tags
 
 
@@ -66,6 +65,9 @@ class EpisodeTags(object):
 
         :returns: an empty string if not found
         """
+        # Imported here to avoid the cyclic import: helper.common -> settings -> oldbeard.common -> tagger.episode
+        from sickchill.helper.common import try_int
+
         attr = "res"
         match = self._get_match_obj(attr)
         return None if not match else try_int(match.group("vres"))

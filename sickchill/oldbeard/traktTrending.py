@@ -17,6 +17,8 @@ class traktTrending(object):
         """Get trending show information from Trakt"""
 
         trending_shows = []
+        # pre-bind so the traktException path below still has a value to return
+        black_list = False
 
         trakt_api = TraktAPI(settings.SSL_VERIFY, settings.TRAKT_TIMEOUT)
 
@@ -100,6 +102,19 @@ class traktTrending(object):
         return os.path.join(path, image_name)
 
     def cache_image(self, image_url, image_path):
+        # image_path is built from a request-supplied indexer id, so keep all
+        # reads/writes contained inside the trakt_trending image cache directory
+        # (realpath to follow symlinks, normcase so Windows case differences don't reject)
+        cache_base = os.path.realpath(os.path.join(settings.CACHE_DIR, "images", "trakt_trending"))
+        image_path = os.path.realpath(image_path)
+        try:
+            contained = os.path.commonpath([os.path.normcase(image_path), os.path.normcase(cache_base)]) == os.path.normcase(cache_base)
+        except ValueError:
+            contained = False
+        if not contained:
+            logger.debug(f"Refusing to cache image outside of the trakt_trending cache directory: {image_path}")
+            return
+
         # Only cache if the file does not exist yet
         if not os.path.isfile(image_path):
             helpers.download_file(image_url, image_path, session=self.session)

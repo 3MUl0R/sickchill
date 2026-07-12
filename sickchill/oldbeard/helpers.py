@@ -791,7 +791,7 @@ def check_url(url):
     We only check the URL header.
     """
     try:
-        requests.head(url, verify=False, timeout=10).raise_for_status()
+        requests.head(url, timeout=10).raise_for_status()
     except Exception as error:
         # noinspection PyTypeChecker
         handle_requests_exception(error)

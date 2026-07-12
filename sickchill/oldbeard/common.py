@@ -8,7 +8,6 @@ from sickchill.helper import video_screen_size
 from sickchill.init_helpers import setup_gettext
 from sickchill.oldbeard.numdict import NumDict
 from sickchill.recompiled import tags
-from sickchill.tagger.episode import EpisodeTags
 
 setup_gettext()
 
@@ -264,6 +263,9 @@ class Quality(object):
         :param anime: Boolean to indicate if the show we're resolving is Anime
         :return: Quality
         """
+
+        # Imported here to avoid a circular import: tagger.episode -> helper.common -> settings -> oldbeard.common
+        from sickchill.tagger.episode import EpisodeTags
 
         if not name:
             return Quality.UNKNOWN

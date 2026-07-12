@@ -381,33 +381,48 @@ class NumDictTest(unittest.TestCase):
         assert set(ikeys) == set(num_dict_2)
 
         # Test setdefault
+        # setdefault mutates the dict, so keep the calls outside the asserts (asserts vanish under python -O)
         val = 1
         test = NumDict()
-        assert test.setdefault(val, 42) == 42
-        assert test.setdefault(val, "42") == 42
-        assert test.setdefault(val, 42) != "42"
-        assert test.setdefault(val, "42") != "42"
+        result = test.setdefault(val, 42)
+        assert result == 42
+        result = test.setdefault(val, "42")
+        assert result == 42
+        result = test.setdefault(val, 42)
+        assert result != "42"
+        result = test.setdefault(val, "42")
+        assert result != "42"
         assert val in test
 
-        assert test.setdefault(val, 23) == 42
-        assert test.setdefault(val, "23") == 42
-        assert test.setdefault(val, 23) != "42"
-        assert test.setdefault(val, "23") != "42"
+        result = test.setdefault(val, 23)
+        assert result == 42
+        result = test.setdefault(val, "23")
+        assert result == 42
+        result = test.setdefault(val, 23)
+        assert result != "42"
+        result = test.setdefault(val, "23")
+        assert result != "42"
         assert val in test
 
         # Test pop
+        # pop mutates the dict, so keep the calls outside the asserts (asserts vanish under python -O)
         val = 1
         test = NumDict({val: 42})
-        assert test.pop(val) == 42
+        popped = test.pop(val)
+        assert popped == 42
         pytest.raises(KeyError, test.pop, val)
-        assert test.pop(val, 1) == 1
+        popped = test.pop(val, 1)
+        assert popped == 1
         test[val] = 42
-        assert test.pop(val, 1) == 42
+        popped = test.pop(val, 1)
+        assert popped == 42
 
         # Test popitem
+        # popitem mutates the dict, so keep the call outside the assert (asserts vanish under python -O)
         val = 1
         test = NumDict({val: 42})
-        assert test.popitem() == (val, 42)
+        popped_item = test.popitem()
+        assert popped_item == (val, 42)
         pytest.raises(KeyError, test.popitem)
 
     def test_missing(self):

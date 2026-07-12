@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -58,6 +59,15 @@ _STRIPPED_ENV_VARS = (
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_USE_VERTEX",
 )
+
+# The cli_path setting exists to point SickChill at a claude binary, nothing else;
+# anything with a different basename is refused so the web UI cannot be used to
+# execute an arbitrary program.
+_ALLOWED_BINARY_BASENAMES = {"claude", "claude.exe", "claude.cmd", "claude.bat", "claude.ps1"}
+
+# Model must be an alias or full model id. A flag-shaped value (leading "-") would
+# otherwise be parsed by the CLI as an option instead of a --model argument.
+_MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*")
 
 # Shared auth-status cache (survives client resets so the hot path stays cheap).
 AUTH_CACHE_TTL = 300.0  # seconds a successful probe stays "fresh"
@@ -127,7 +137,11 @@ class ClaudeCLIClient(BaseAIClient):
             effort: Reasoning effort passed to ``--effort`` (one of SUPPORTED_EFFORTS);
                 anything unrecognized falls back to DEFAULT_EFFORT.
         """
-        self.model = model or self.DEFAULT_MODEL
+        model = model or self.DEFAULT_MODEL
+        if not _MODEL_ID_RE.fullmatch(model):
+            logger.warning(f"AI CLI model {model!r} is not a valid model id or alias; using {self.DEFAULT_MODEL}")
+            model = self.DEFAULT_MODEL
+        self.model = model
         self.timeout = timeout if timeout and timeout > 0 else self.DEFAULT_TIMEOUT
         self.cli_path = cli_path or ""
         self.effort = effort if effort in self.SUPPORTED_EFFORTS else self.DEFAULT_EFFORT
@@ -155,6 +169,10 @@ class ClaudeCLIClient(BaseAIClient):
                 resolved = shutil.which(name)
                 if resolved:
                     break
+
+        if resolved and os.path.basename(resolved).lower() not in _ALLOWED_BINARY_BASENAMES:
+            logger.warning(f"AI CLI path {resolved!r} is not a claude binary; refusing to execute it")
+            resolved = None
 
         self._binary = resolved
         self._binary_resolved = True

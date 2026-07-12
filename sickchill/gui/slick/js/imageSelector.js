@@ -79,7 +79,8 @@
     }
 
     function createImage(imageSource, thumbSource) {
-        const image = $('<img alt="' + $('#showID').attr('value') + ' ' + imageType + '"/>')
+        const image = $('<img/>')
+            .attr('alt', $('#showID').attr('value') + ' ' + imageType)
             .attr('data-image-type', imageSelectorDialog.data('image-type'))
             .addClass('image-selector-item').on('click', event_ => {
                 $('.image-selector-item-selected').removeClass('image-selector-item-selected');
