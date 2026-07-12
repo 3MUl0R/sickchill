@@ -11,18 +11,13 @@ from tornado.locale import load_gettext_translations
 
 import sickchill
 from sickchill import logger, settings, show_updater, update_manager
-from sickchill.oldbeard.common import ARCHIVED, IGNORED, MULTI_EP_STRINGS, SD, SKIPPED, WANTED
-from sickchill.oldbeard.config import check_section, check_setting_bool, check_setting_float, check_setting_int, check_setting_str, ConfigMigrator
-from sickchill.oldbeard.databases import failed, main
-from sickchill.oldbeard.providers.newznab import NewznabProvider
-from sickchill.oldbeard.providers.rsstorrent import TorrentRssProvider
-
-from .init_helpers import locale_dir, setup_gettext
-from .oldbeard import (
+from sickchill.init_helpers import locale_dir, setup_gettext
+from sickchill.oldbeard import (
     clients,
     config,
     dailysearcher,
     db,
+    download_status,
     helpers,
     image_cache,
     naming,
@@ -37,9 +32,13 @@ from .oldbeard import (
     subtitles,
     traktChecker,
 )
-from .oldbeard.databases import cache
-from .providers import metadata
-from .system.Shutdown import Shutdown
+from sickchill.oldbeard.common import ARCHIVED, IGNORED, MULTI_EP_STRINGS, SD, SKIPPED, WANTED
+from sickchill.oldbeard.config import ConfigMigrator, check_section, check_setting_bool, check_setting_float, check_setting_int, check_setting_str
+from sickchill.oldbeard.databases import cache, failed, main
+from sickchill.oldbeard.providers.newznab import NewznabProvider
+from sickchill.oldbeard.providers.rsstorrent import TorrentRssProvider
+from sickchill.providers import metadata
+from sickchill.system.Shutdown import Shutdown
 
 
 def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool = False, disable_file_logging: bool = False) -> bool:
@@ -55,6 +54,7 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
         check_section(settings.CFG, "KODI")
         check_section(settings.CFG, "PLEX")
         check_section(settings.CFG, "Emby")
+        check_section(settings.CFG, "Jellyfin")
         check_section(settings.CFG, "Growl")
         check_section(settings.CFG, "Prowl")
         check_section(settings.CFG, "Twitter")
@@ -459,6 +459,10 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
         settings.EMBY_HOST = check_setting_str(settings.CFG, "Emby", "emby_host")
         settings.EMBY_APIKEY = check_setting_str(settings.CFG, "Emby", "emby_apikey")
 
+        settings.USE_JELLYFIN = check_setting_bool(settings.CFG, "Jellyfin", "use_jellyfin")
+        settings.JELLYFIN_HOST = check_setting_str(settings.CFG, "Jellyfin", "jellyfin_host")
+        settings.JELLYFIN_APIKEY = check_setting_str(settings.CFG, "Jellyfin", "jellyfin_apikey")
+
         settings.USE_GROWL = check_setting_bool(settings.CFG, "Growl", "use_growl")
         settings.GROWL_NOTIFY_ONSNATCH = check_setting_bool(settings.CFG, "Growl", "growl_notify_onsnatch")
         settings.GROWL_NOTIFY_ONDOWNLOAD = check_setting_bool(settings.CFG, "Growl", "growl_notify_ondownload")
@@ -472,6 +476,49 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
         settings.FREEMOBILE_NOTIFY_ONSUBTITLEDOWNLOAD = check_setting_bool(settings.CFG, "FreeMobile", "freemobile_notify_onsubtitledownload")
         settings.FREEMOBILE_ID = check_setting_str(settings.CFG, "FreeMobile", "freemobile_id")
         settings.FREEMOBILE_APIKEY = check_setting_str(settings.CFG, "FreeMobile", "freemobile_apikey")
+
+        # AI Configuration
+        settings.AI_ENABLED = check_setting_bool(settings.CFG, "AI", "ai_enabled")
+        settings.AI_REQUEST_TIMEOUT = check_setting_int(settings.CFG, "AI", "ai_request_timeout", 120, min_val=30, max_val=300, fallback_def=False)
+        settings.AI_CONFIDENCE_THRESHOLD = check_setting_float(settings.CFG, "AI", "ai_confidence_threshold", 0.80, min_val=0.0, max_val=1.0)
+        settings.AI_NOTIFY_ON_FALLBACK_FAILURE = check_setting_bool(settings.CFG, "AI", "ai_notify_on_fallback_failure", True)
+
+        settings.AI_PROVIDER = check_setting_str(settings.CFG, "AI", "ai_provider", "api")
+
+        settings.ANTHROPIC_API_KEY = check_setting_str(settings.CFG, "AI", "anthropic_api_key", censor_log=True)
+        settings.ANTHROPIC_MODEL = check_setting_str(settings.CFG, "AI", "anthropic_model", "claude-sonnet-4-6")
+
+        settings.AI_CLI_PATH = check_setting_str(settings.CFG, "AI", "ai_cli_path", "")
+        settings.AI_CLI_MODEL = check_setting_str(settings.CFG, "AI", "ai_cli_model", "sonnet")
+        settings.AI_CLI_EFFORT = check_setting_str(settings.CFG, "AI", "ai_cli_effort", "low")
+        if settings.AI_CLI_EFFORT not in ("low", "medium", "high", "xhigh", "max"):
+            settings.AI_CLI_EFFORT = "low"
+
+        settings.AI_MAX_CALLS_PER_HOUR = check_setting_int(settings.CFG, "AI", "ai_max_calls_per_hour", 20, min_val=1, max_val=100)
+        settings.AI_MAX_CALLS_PER_DAY = check_setting_int(settings.CFG, "AI", "ai_max_calls_per_day", 200, min_val=1, max_val=1000)
+        settings.AI_CACHE_TTL_DAYS = check_setting_int(settings.CFG, "AI", "ai_cache_ttl_days", 30, min_val=1, max_val=365)
+
+        settings.AI_SEARCH_ENABLED = check_setting_bool(settings.CFG, "AI", "ai_search_enabled")
+        settings.AI_SEARCH_ONLY_ON_FAILURE = check_setting_bool(settings.CFG, "AI", "ai_search_only_on_failure", True)
+        settings.AI_SEARCH_COOLDOWN_DAYS_PER_SHOW = check_setting_int(settings.CFG, "AI", "ai_search_cooldown_days_per_show", 7, min_val=1, max_val=30)
+        settings.AI_SEARCH_MIN_RESULTS = check_setting_int(settings.CFG, "AI", "ai_search_min_results", 1, min_val=1, max_val=10)
+        settings.AI_SEARCH_FALLBACK_TO_RULES_ON_ERROR = check_setting_bool(settings.CFG, "AI", "ai_search_fallback_to_rules_on_error", True)
+        settings.AI_SEARCH_ALLOW_RELAX_FILTERS = check_setting_bool(settings.CFG, "AI", "ai_search_allow_relax_filters")
+        settings.AI_SEARCH_MATCH_INCLUDE_REASONING = check_setting_bool(settings.CFG, "AI", "ai_search_match_include_reasoning")
+
+        settings.AI_POSTPROCESS_MATCH_ENABLED = check_setting_bool(settings.CFG, "AI", "ai_postprocess_match_enabled")
+        settings.AI_POSTPROCESS_MATCH_ONLY_ON_FAILURE = check_setting_bool(settings.CFG, "AI", "ai_postprocess_match_only_on_failure", True)
+        settings.AI_POSTPROCESS_MATCH_COOLDOWN_HOURS_PER_FILE = check_setting_int(
+            settings.CFG, "AI", "ai_postprocess_match_cooldown_hours_per_file", 1, min_val=1, max_val=720
+        )
+        settings.AI_POSTPROCESS_MATCH_MIN_CONFIDENCE = check_setting_float(
+            settings.CFG, "AI", "ai_postprocess_match_min_confidence", 0.85, min_val=0.0, max_val=1.0
+        )
+
+        settings.AI_POSTPROCESS_ANALYZE_ENABLED = check_setting_bool(settings.CFG, "AI", "ai_postprocess_analyze_enabled")
+        settings.AI_POSTPROCESS_VERIFY_QUALITY = check_setting_bool(settings.CFG, "AI", "ai_postprocess_verify_quality", True)
+        settings.AI_POSTPROCESS_DETECT_ISSUES = check_setting_bool(settings.CFG, "AI", "ai_postprocess_detect_issues", True)
+        settings.AI_POSTPROCESS_SUGGEST_METADATA = check_setting_bool(settings.CFG, "AI", "ai_postprocess_suggest_metadata")
 
         settings.FLARESOLVERR_URI = check_setting_str(settings.CFG, "General", "flaresolverr_uri")
 
@@ -683,6 +730,7 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
         settings.SUBTITLES_PERFECT_MATCH = check_setting_bool(settings.CFG, "Subtitles", "subtitles_perfect_match", True)
         settings.EMBEDDED_SUBTITLES_ALL = check_setting_bool(settings.CFG, "Subtitles", "embedded_subtitles_all")
         settings.SUBTITLES_HEARING_IMPAIRED = check_setting_bool(settings.CFG, "Subtitles", "subtitles_hearing_impaired")
+        settings.SUBTITLES_FOREIGN_ONLY = check_setting_bool(settings.CFG, "Subtitles", "subtitles_foreign_only")
         settings.SUBTITLES_FINDER_FREQUENCY = check_setting_int(settings.CFG, "Subtitles", "subtitles_finder_frequency", 1, min_val=1)
         settings.SUBTITLES_MULTI = check_setting_bool(settings.CFG, "Subtitles", "subtitles_multi", True)
         settings.SUBTITLES_KEEP_ONLY_WANTED = check_setting_bool(settings.CFG, "Subtitles", "subtitles_keep_only_wanted")
@@ -696,12 +744,29 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
 
         settings.OPENSUBTITLES_USER = check_setting_str(settings.CFG, "Subtitles", "opensubtitles_username", censor_log=True)
         settings.OPENSUBTITLES_PASS = check_setting_str(settings.CFG, "Subtitles", "opensubtitles_password", censor_log=True)
+        settings.OPENSUBTITLESCOM_USER = check_setting_str(settings.CFG, "Subtitles", "opensubtitlescom_username", censor_log=True)
+        settings.OPENSUBTITLESCOM_PASS = check_setting_str(settings.CFG, "Subtitles", "opensubtitlescom_password", censor_log=True)
 
         settings.SUBSCENTER_USER = check_setting_str(settings.CFG, "Subtitles", "subscenter_username", censor_log=True)
         settings.SUBSCENTER_PASS = check_setting_str(settings.CFG, "Subtitles", "subscenter_password", censor_log=True)
 
         settings.USE_FAILED_DOWNLOADS = check_setting_bool(settings.CFG, "FailedDownloads", "use_failed_downloads")
         settings.DELETE_FAILED = check_setting_bool(settings.CFG, "FailedDownloads", "delete_failed")
+
+        settings.FAILED_DOWNLOAD_POLL_FREQUENCY = max(
+            settings.MIN_FAILED_DOWNLOAD_POLL_FREQUENCY,
+            check_setting_int(settings.CFG, "FailedDownloads", "failed_download_poll_frequency", settings.FAILED_DOWNLOAD_POLL_FREQUENCY),
+        )
+        settings.FAILED_DOWNLOAD_ABSENT_CYCLES = max(1, check_setting_int(settings.CFG, "FailedDownloads", "failed_download_absent_cycles", settings.FAILED_DOWNLOAD_ABSENT_CYCLES))
+        settings.FAILED_DOWNLOAD_VANISHED_HOURS = max(1, check_setting_int(settings.CFG, "FailedDownloads", "failed_download_vanished_hours", settings.FAILED_DOWNLOAD_VANISHED_HOURS))
+        settings.FAILED_DOWNLOAD_PP_STUCK_HOURS = max(1, check_setting_int(settings.CFG, "FailedDownloads", "failed_download_pp_stuck_hours", settings.FAILED_DOWNLOAD_PP_STUCK_HOURS))
+        settings.FAILED_DOWNLOAD_ROW_TTL_DAYS = max(1, check_setting_int(settings.CFG, "FailedDownloads", "failed_download_row_ttl_days", settings.FAILED_DOWNLOAD_ROW_TTL_DAYS))
+        settings.FAILED_DOWNLOAD_ROW_MAX_AGE_DAYS = max(
+            settings.FAILED_DOWNLOAD_ROW_TTL_DAYS,
+            check_setting_int(settings.CFG, "FailedDownloads", "failed_download_row_max_age_days", settings.FAILED_DOWNLOAD_ROW_MAX_AGE_DAYS),
+        )
+        settings.FAILED_DOWNLOAD_MAX_ENQUEUES = max(1, check_setting_int(settings.CFG, "FailedDownloads", "failed_download_max_enqueues", settings.FAILED_DOWNLOAD_MAX_ENQUEUES))
+        settings.FAILED_DOWNLOAD_CLIENT_CLEANUP = check_setting_bool(settings.CFG, "FailedDownloads", "failed_download_client_cleanup")
 
         settings.BACKLOG_MISSING_ONLY = check_setting_bool(settings.CFG, "General", "backlog_missing_only")
 
@@ -811,7 +876,13 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
             if hasattr(curProvider, "freeleech"):
                 curProvider.freeleech = check_setting_bool(settings.CFG, curProvider.get_id().upper(), curProvider.get_id("_freeleech"))
             if hasattr(curProvider, "search_mode"):
-                curProvider.search_mode = check_setting_str(settings.CFG, curProvider.get_id().upper(), curProvider.get_id("_search_mode"), "episode")
+                # Default to the value already parsed (e.g. from a custom provider's pipe string) so a
+                # missing per-provider key does not clobber it; normalize legacy eponly/sponly values.
+                curProvider.search_mode = curProvider.normalize_search_mode(
+                    check_setting_str(
+                        settings.CFG, curProvider.get_id().upper(), curProvider.get_id("_search_mode"), curProvider.search_mode or "episode"
+                    )
+                )
             if hasattr(curProvider, "search_fallback"):
                 curProvider.search_fallback = check_setting_bool(settings.CFG, curProvider.get_id().upper(), curProvider.get_id("_search_fallback"))
             if hasattr(curProvider, "enable_daily"):
@@ -899,9 +970,13 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
             threadName="DAILYSEARCHER",
         )
 
+        # Scheduler sets lastRun = now + run_delay - cycleTime, so a run_delay equal to cycleTime defers the
+        # first run by a whole cycle. An instance that restarts more often than backlog_frequency would then
+        # never search its backlog. A short fixed delay is safe: BacklogSearcher tracks last_backlog in the
+        # DB itself and downgrades early wakeups to a limited (BACKLOG_DAYS) run.
         update_interval = datetime.timedelta(minutes=settings.BACKLOG_FREQUENCY)
         settings.backlogSearchScheduler = searchBacklog.BacklogSearchScheduler(
-            searchBacklog.BacklogSearcher(), cycleTime=update_interval, threadName="BACKLOG", run_delay=update_interval
+            searchBacklog.BacklogSearcher(), cycleTime=update_interval, threadName="BACKLOG", run_delay=datetime.timedelta(minutes=20)
         )
 
         search_intervals = {"15m": 15, "45m": 45, "90m": 90, "4h": 4 * 60, "daily": 24 * 60}
@@ -912,12 +987,15 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
             update_interval = datetime.timedelta(hours=1)
             run_at = datetime.time(hour=1)  # 1 AM
 
+        # Same first-run deferral as the backlog scheduler above: with run_delay=update_interval a daily
+        # propers check never fires on an instance that restarts more than once a day. Capped by the
+        # interval so the short (15m) preset is not made worse than its own cycle.
         settings.properFinderScheduler = scheduler.Scheduler(
             properFinder.ProperFinder(),
             cycleTime=update_interval,
             threadName="FINDPROPERS",
             start_time=run_at,
-            run_delay=update_interval,
+            run_delay=min(update_interval, datetime.timedelta(minutes=25)),
             silent=not settings.DOWNLOAD_PROPERS,
         )
 
@@ -935,6 +1013,16 @@ def initialize(console_logging: bool = True, debug: bool = False, dbdebug: bool 
             cycleTime=datetime.timedelta(minutes=settings.AUTOPOSTPROCESSOR_FREQUENCY),
             threadName="POSTPROCESSOR",
             silent=not settings.PROCESS_AUTOMATICALLY,
+        )
+
+        # run_delay must stay well under cycleTime, or the first poll is deferred by up to a whole cycle
+        # (see the backlog scheduler comment above).
+        settings.downloadStatusScheduler = scheduler.Scheduler(
+            download_status.DownloadStatusUpdater(),
+            run_delay=datetime.timedelta(minutes=1),
+            cycleTime=datetime.timedelta(minutes=settings.FAILED_DOWNLOAD_POLL_FREQUENCY),
+            threadName="DOWNLOADSTATUS",
+            silent=not settings.USE_FAILED_DOWNLOADS,
         )
 
         settings.traktCheckerScheduler = scheduler.Scheduler(
@@ -1006,6 +1094,10 @@ def start():
             settings.autoPostProcessorScheduler.enable = settings.PROCESS_AUTOMATICALLY
             settings.autoPostProcessorScheduler.start()
 
+            # start asking the download client what became of our snatches
+            settings.downloadStatusScheduler.enable = settings.USE_FAILED_DOWNLOADS
+            settings.downloadStatusScheduler.start()
+
             # start the subtitles finder
             settings.subtitlesFinderScheduler.enable = settings.USE_SUBTITLES
             settings.subtitlesFinderScheduler.start()
@@ -1033,6 +1125,7 @@ def halt():
                 settings.searchQueueScheduler,
                 settings.autoPostProcessorScheduler,
                 settings.postProcessorTaskScheduler,
+                settings.downloadStatusScheduler,
                 settings.traktCheckerScheduler,
                 settings.properFinderScheduler,
                 settings.subtitlesFinderScheduler,
@@ -1363,6 +1456,11 @@ def save_config():
                 "emby_host": settings.EMBY_HOST,
                 "emby_apikey": settings.EMBY_APIKEY,
             },
+            "Jellyfin": {
+                "use_jellyfin": int(settings.USE_JELLYFIN),
+                "jellyfin_host": settings.JELLYFIN_HOST,
+                "jellyfin_apikey": settings.JELLYFIN_APIKEY,
+            },
             "Growl": {
                 "use_growl": int(settings.USE_GROWL),
                 "growl_notify_onsnatch": int(settings.GROWL_NOTIFY_ONSNATCH),
@@ -1378,6 +1476,36 @@ def save_config():
                 "freemobile_notify_onsubtitledownload": int(settings.FREEMOBILE_NOTIFY_ONSUBTITLEDOWNLOAD),
                 "freemobile_id": settings.FREEMOBILE_ID,
                 "freemobile_apikey": settings.FREEMOBILE_APIKEY,
+            },
+            "AI": {
+                "ai_enabled": int(settings.AI_ENABLED),
+                "ai_request_timeout": int(settings.AI_REQUEST_TIMEOUT),
+                "ai_confidence_threshold": float(settings.AI_CONFIDENCE_THRESHOLD),
+                "ai_notify_on_fallback_failure": int(settings.AI_NOTIFY_ON_FALLBACK_FAILURE),
+                "ai_provider": settings.AI_PROVIDER,
+                "anthropic_api_key": settings.ANTHROPIC_API_KEY or "",
+                "anthropic_model": settings.ANTHROPIC_MODEL,
+                "ai_cli_path": settings.AI_CLI_PATH or "",
+                "ai_cli_model": settings.AI_CLI_MODEL,
+                "ai_cli_effort": settings.AI_CLI_EFFORT,
+                "ai_max_calls_per_hour": int(settings.AI_MAX_CALLS_PER_HOUR),
+                "ai_max_calls_per_day": int(settings.AI_MAX_CALLS_PER_DAY),
+                "ai_cache_ttl_days": int(settings.AI_CACHE_TTL_DAYS),
+                "ai_search_enabled": int(settings.AI_SEARCH_ENABLED),
+                "ai_search_only_on_failure": int(settings.AI_SEARCH_ONLY_ON_FAILURE),
+                "ai_search_cooldown_days_per_show": int(settings.AI_SEARCH_COOLDOWN_DAYS_PER_SHOW),
+                "ai_search_min_results": int(settings.AI_SEARCH_MIN_RESULTS),
+                "ai_search_fallback_to_rules_on_error": int(settings.AI_SEARCH_FALLBACK_TO_RULES_ON_ERROR),
+                "ai_search_allow_relax_filters": int(settings.AI_SEARCH_ALLOW_RELAX_FILTERS),
+                "ai_search_match_include_reasoning": int(settings.AI_SEARCH_MATCH_INCLUDE_REASONING),
+                "ai_postprocess_match_enabled": int(settings.AI_POSTPROCESS_MATCH_ENABLED),
+                "ai_postprocess_match_only_on_failure": int(settings.AI_POSTPROCESS_MATCH_ONLY_ON_FAILURE),
+                "ai_postprocess_match_cooldown_hours_per_file": int(settings.AI_POSTPROCESS_MATCH_COOLDOWN_HOURS_PER_FILE),
+                "ai_postprocess_match_min_confidence": float(settings.AI_POSTPROCESS_MATCH_MIN_CONFIDENCE),
+                "ai_postprocess_analyze_enabled": int(settings.AI_POSTPROCESS_ANALYZE_ENABLED),
+                "ai_postprocess_verify_quality": int(settings.AI_POSTPROCESS_VERIFY_QUALITY),
+                "ai_postprocess_detect_issues": int(settings.AI_POSTPROCESS_DETECT_ISSUES),
+                "ai_postprocess_suggest_metadata": int(settings.AI_POSTPROCESS_SUGGEST_METADATA),
             },
             "Telegram": {
                 "use_telegram": int(settings.USE_TELEGRAM),
@@ -1640,6 +1768,7 @@ def save_config():
                 "subtitles_perfect_match": int(settings.SUBTITLES_PERFECT_MATCH),
                 "embedded_subtitles_all": int(settings.EMBEDDED_SUBTITLES_ALL),
                 "subtitles_hearing_impaired": int(settings.SUBTITLES_HEARING_IMPAIRED),
+                "subtitles_foreign_only": int(settings.SUBTITLES_FOREIGN_ONLY),
                 "subtitles_finder_frequency": int(settings.SUBTITLES_FINDER_FREQUENCY),
                 "subtitles_multi": int(settings.SUBTITLES_MULTI),
                 "subtitles_extra_scripts": "|".join(settings.SUBTITLES_EXTRA_SCRIPTS),
@@ -1650,12 +1779,22 @@ def save_config():
                 "itasa_password": helpers.encrypt(settings.ITASA_PASS, settings.ENCRYPTION_VERSION),
                 "opensubtitles_username": settings.OPENSUBTITLES_USER,
                 "opensubtitles_password": helpers.encrypt(settings.OPENSUBTITLES_PASS, settings.ENCRYPTION_VERSION),
+                "opensubtitlescom_username": settings.OPENSUBTITLESCOM_USER,
+                "opensubtitlescom_password": helpers.encrypt(settings.OPENSUBTITLESCOM_PASS, settings.ENCRYPTION_VERSION),
                 "subscenter_username": settings.SUBSCENTER_USER,
                 "subscenter_password": helpers.encrypt(settings.SUBSCENTER_PASS, settings.ENCRYPTION_VERSION),
             },
             "FailedDownloads": {
                 "use_failed_downloads": int(settings.USE_FAILED_DOWNLOADS),
                 "delete_failed": int(settings.DELETE_FAILED),
+                "failed_download_poll_frequency": int(settings.FAILED_DOWNLOAD_POLL_FREQUENCY),
+                "failed_download_absent_cycles": int(settings.FAILED_DOWNLOAD_ABSENT_CYCLES),
+                "failed_download_vanished_hours": int(settings.FAILED_DOWNLOAD_VANISHED_HOURS),
+                "failed_download_pp_stuck_hours": int(settings.FAILED_DOWNLOAD_PP_STUCK_HOURS),
+                "failed_download_row_ttl_days": int(settings.FAILED_DOWNLOAD_ROW_TTL_DAYS),
+                "failed_download_row_max_age_days": int(settings.FAILED_DOWNLOAD_ROW_MAX_AGE_DAYS),
+                "failed_download_max_enqueues": int(settings.FAILED_DOWNLOAD_MAX_ENQUEUES),
+                "failed_download_client_cleanup": int(settings.FAILED_DOWNLOAD_CLIENT_CLEANUP),
             },
             "ANIDB": {
                 "use_anidb": int(settings.USE_ANIDB),

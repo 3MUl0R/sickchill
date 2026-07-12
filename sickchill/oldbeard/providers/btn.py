@@ -2,16 +2,17 @@ import math
 import socket
 import time
 from datetime import datetime
-from typing import Dict, Iterable, List, TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Dict, Iterable, List, Union
 
 import jsonrpclib
 
 from sickchill import logger, settings
 from sickchill.helper.common import episode_num
 from sickchill.helper.exceptions import AuthException
-from sickchill.oldbeard import classes, scene_exceptions, tvcache
+from sickchill.oldbeard import scene_exceptions, tvcache
 from sickchill.oldbeard.common import cpu_presets
 from sickchill.oldbeard.helpers import sanitizeSceneName
+from sickchill.providers import result_classes
 from sickchill.providers.torrent.TorrentProvider import TorrentProvider
 
 if TYPE_CHECKING:
@@ -37,7 +38,7 @@ class Provider(TorrentProvider):
 
     def _check_auth(self):
         if not self.api_key:
-            logger.warning("Invalid api key. Check your settings")
+            logger.warning(_("Invalid api key. Check your settings"))
 
         return True
 
@@ -64,7 +65,7 @@ class Provider(TorrentProvider):
 
         data = self._api_call(search_params)
         if not data:
-            logger.debug("No data returned from provider")
+            logger.debug(_("No data returned from provider"))
             return results
 
         found = {}
@@ -96,7 +97,7 @@ class Provider(TorrentProvider):
                 (title, url) = self._get_title_and_url(torrent_info)
 
                 if title and url:
-                    logger.debug("Found result: {0} ".format(title))
+                    logger.debug(_("Found result: {0} ").format(title))
                     results.append(torrent_info)
 
         return sorted(results, key=lambda x: self._get_seeders_and_leechers(x)[0], reverse=True)
@@ -109,16 +110,16 @@ class Provider(TorrentProvider):
             time.sleep(cpu_presets[settings.CPU_PRESET])
         except jsonrpclib.jsonrpc.ProtocolError as error:
             if error == (-32001, "Invalid API Key"):
-                logger.warning("The API key you provided was rejected because it is invalid. Check your provider configuration.")
+                logger.warning(_("The API key you provided was rejected because it is invalid. Check your provider configuration."))
             elif error == (-32002, "Call Limit Exceeded"):
-                logger.warning("You have exceeded the limit of 150 calls per hour, per API key which is unique to your user account")
+                logger.warning(_("You have exceeded the limit of 150 calls per hour, per API key which is unique to your user account"))
             else:
                 logger.exception(f"JSON-RPC protocol error while accessing provider. Error: {error} ")
             data = {"api-error": f"{error}"}
             return data
 
         except socket.timeout:
-            logger.warning("Timeout while accessing provider")
+            logger.warning(_("Timeout while accessing provider"))
 
         except socket.error as error:
             # Note that sometimes timeouts are thrown as socket errors
@@ -233,7 +234,7 @@ class Provider(TorrentProvider):
                     if result_date and (not search_date or result_date > search_date):
                         title, url = self._get_title_and_url(item)
                         if title and url:
-                            results.append(classes.Proper(title, url, result_date, self.show))
+                            results.append(result_classes.Proper(title, url, result_date, self.show))
 
         return results
 

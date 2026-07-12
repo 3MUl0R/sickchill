@@ -17,6 +17,58 @@ function disableLink(link) {
     link.fadeTo('fast', 0.5);
 }
 
+// Helper function for pill styling
+function buildStatusPill(statusText, quality) {
+    if (!statusText) {
+        return statusText || '';
+    }
+
+    let displayText = statusText; // Default to original text
+
+    // If it already has quality in parentheses, wrap status part
+    const match = statusText.match(/^(.+?)\s*\((.+?)\)$/);
+    if (match) {
+        const statusPart = match[1].trim();
+        const qualityPart = match[2].trim();
+        displayText = `<span class="status pill-${getPillClass(statusPart)}">${statusPart}</span> <span class="quality ${quality}">${qualityPart}</span>`;
+    } else {
+        // Plain status (like "Downloaded", "Skipped", etc.)
+        displayText = `<span class="status pill-${getPillClass(statusText)}">${statusText}</span>`;
+    }
+
+    return displayText;
+}
+
+// Helper function for pill class
+function getPillClass(status) {
+    const lower = status.toLowerCase().trim();
+    if (lower.includes('downloaded') || lower === 'success') {
+        return 'downloaded';
+    }
+
+    if (lower.includes('snatched')) {
+        return 'snatched';
+    }
+
+    if (lower.includes('skipped') || lower.includes('ignored')) {
+        return 'archived';
+    }
+
+    if (lower.includes('archived')) {
+        return 'archived';
+    }
+
+    if (lower.includes('wanted')) {
+        return 'wanted';
+    }
+
+    if (lower.includes('failed')) {
+        return 'failed';
+    }
+
+    return 'unknown';
+}
+
 function updateImages(data) {
     $.each(data.episodes, (name, ep) => {
         // Get td element for current ep
@@ -26,11 +78,9 @@ function updateImages(data) {
 
         // Try to get the <a> Element
         const link = $('a[id=' + ep.show + 'x' + ep.season + 'x' + ep.episode + ']');
-        if (link) {
+        if (link.length > 0) {
             const icon = link.children('span');
             const parent = link.parent();
-
-            let rSearchTerm = '';
             let htmlContent = '';
 
             if (ep.searchstatus.toLowerCase() === 'searching') {
@@ -39,7 +89,7 @@ function updateImages(data) {
                 icon.prop('alt', 'Searching');
 
                 disableLink(link);
-                htmlContent = ep.searchstatus.title;
+                htmlContent = '<span class="status pill-wanted">Searching...</span>'; // Optional nice pill
             } else if (ep.searchstatus.toLowerCase() === 'queued') {
                 icon.prop('class', queuedClass);
                 icon.prop('title', 'Queued');
@@ -50,17 +100,26 @@ function updateImages(data) {
             } else if (ep.searchstatus.toLowerCase() === 'finished') {
                 icon.prop('class', searchClass);
                 if (ep.quality !== 'N/A') {
-                    link.prop('class', 'epRetry');
+                    // Keep the link's class and href consistent with the server's intent.
+                    // A retry (mark-as-failed) link is only valid when failed-download
+                    // handling is enabled; otherwise keep it a plain search link so the
+                    // "mark as failed" modal never appears for a no-op action.
+                    const href = link.prop('href') || '';
+                    if (ep.retryEnabled) {
+                        link.prop('class', 'epRetry');
+                        link.prop('href', href.replace('searchEpisode', 'retryEpisode'));
+                    } else {
+                        link.prop('class', 'epSearch');
+                        link.prop('href', href.replace('retryEpisode', 'searchEpisode'));
+                    }
                 }
 
                 icon.prop('title', 'Search');
                 icon.prop('alt', 'Search');
-
                 enableLink(link);
 
-                // Update Status and Quality
-                rSearchTerm = /(\w+)\s\((.+?)\)/;
-                htmlContent = ep.status.replace(rSearchTerm, '$1 <span class="quality ' + ep.quality + '">$2</span>');
+                // Update status and quality
+                htmlContent = buildStatusPill(ep.status, ep.quality);
                 parent.closest('tr').prop('class', ep.overview + ' season-' + ep.season + ' seasonstyle');
             }
 
@@ -75,40 +134,6 @@ function updateImages(data) {
                 parent.siblings('.episode').html('<span title="' + ep.location + '" class="addQTip">' + ep.episode + '</span>');
             }
         }
-
-        const elementCompleteEpisodes = $('a[id=forceUpdate-' + ep.show + 'x' + ep.season + 'x' + ep.episode + ']');
-        const spanCompleteEpisodes = elementCompleteEpisodes.children('span');
-        if (elementCompleteEpisodes) {
-            if (ep.searchstatus.toLowerCase() === 'searching') {
-                spanCompleteEpisodes.prop('class', loadingClass);
-                spanCompleteEpisodes.prop('title', 'Searching');
-                spanCompleteEpisodes.prop('alt', 'Searching');
-                disableLink(elementCompleteEpisodes);
-            } else if (ep.searchstatus.toLowerCase() === 'queued') {
-                spanCompleteEpisodes.prop('class', queuedClass);
-                spanCompleteEpisodes.prop('title', 'Queued');
-                spanCompleteEpisodes.prop('alt', 'Queued');
-                disableLink(elementCompleteEpisodes);
-            } else if (ep.searchstatus.toLowerCase() === 'finished') {
-                spanCompleteEpisodes.prop('class', searchClass);
-                spanCompleteEpisodes.prop('title', 'Search');
-                spanCompleteEpisodes.prop('alt', 'Search');
-                if (ep.overview.toLowerCase() === 'snatched') {
-                    // Find Banner or Poster
-                    let actionElement = elementCompleteEpisodes.closest('div.ep_listing');
-                    if (actionElement.length === 0 && elementCompleteEpisodes.closest('table.calendarTable').length === 0) {
-                        actionElement = elementCompleteEpisodes.closest('tr');
-                    }
-
-                    if (actionElement.length > 0) {
-                        // Remove any listing-* classes and add listing-snatched (keeping non listing-* classes)
-                        actionElement.attr('class', (i, value) => value.replaceAll(/(^|\s)listing-\S+/g, '')).addClass('listing-snatched');
-                    }
-                }
-
-                enableLink(elementCompleteEpisodes);
-            }
-        }
     });
 }
 
@@ -120,7 +145,6 @@ function checkManualSearches() {
         url,
         success(data) {
             pollInterval = data.episodes ? 5000 : 15_000;
-
             updateImages(data);
         },
         error() {
@@ -153,7 +177,13 @@ $(document).ready(checkManualSearches);
 
         let url = selectedEpisode.prop('href');
 
-        if (failedDownload === false) {
+        // Route to the correct endpoint based on the user's "mark as failed" answer.
+        // Only a retry link (failed-download handling enabled + episode snatched/downloaded)
+        // may go to retryEpisode; everything else is a plain searchEpisode. This is robust
+        // even if the href and class momentarily disagree.
+        if (selectedEpisode.hasClass('epRetry') && failedDownload === true) {
+            url = url.replace('searchEpisode', 'retryEpisode');
+        } else {
             url = url.replace('retryEpisode', 'searchEpisode');
         }
 
@@ -174,10 +204,8 @@ $(document).ready(checkManualSearches);
                     parent.parent().removeClass('skipped wanted qual good unaired').addClass('snatched');
                 }
 
-                // Applying the quality class
-                const rSearchTerm = /(\w+)\s\((.+?)\)/;
-                const htmlContent = data.result.replace(rSearchTerm, '$1 <span class="quality ' + data.quality + '">$2</span>');
-                // Update the status column if it exists
+                // With search success update the status with the result
+                const htmlContent = buildStatusPill(data.result, data.quality);
                 parent.siblings('.col-status').html(htmlContent);
                 // Only if the queuing was successful, disable the onClick event of the loading image
                 disableLink(link);
@@ -216,6 +244,11 @@ $(document).ready(checkManualSearches);
             }
 
             selectedEpisode = $(this);
+
+            // Reset per-click state so a prior modal answer can't leak into this search
+            // (e.g. a previous "yes, mark as failed" or "yes, include quality").
+            failedDownload = false;
+            qualityDownload = false;
 
             if ($(this).hasClass('epRetry')) {
                 $('#manualSearchModalFailed').modal('show');

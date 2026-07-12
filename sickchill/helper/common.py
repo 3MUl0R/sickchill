@@ -1,3 +1,5 @@
+import hashlib
+import os
 import platform
 import re
 import uuid
@@ -8,6 +10,7 @@ from typing import Union
 
 import appdirs
 import rarfile
+import validators
 
 from sickchill import settings
 from sickchill.init_helpers import get_current_version
@@ -209,6 +212,106 @@ def is_media_file(filename):
     return (get_extension(path, lower=True) in MEDIA_EXTENSIONS) or (is_rar and settings.UNPACK == settings.UNPACK_PROCESS_INTACT)
 
 
+# Bonus content that ships alongside anime batch releases: creditless (non-credit) openings and
+# endings, commercials, promotional videos, Blu-ray disc menus. None of these are episodes, and none
+# carry an episode number, so the post-processor used to fall back to the batch FOLDER name and file
+# them as the entire season -- generating a destination name holding every episode title in the pack.
+#
+# Matched only as standalone tokens, so an episode whose title merely contains one of these words is
+# left alone. Deliberately conservative: bare "OP"/"ED"/"SP" are far too common in real titles.
+# Distinctive enough to identify bonus content on their own. Every real-world spelling of the
+# non-credit ("creditless"/"textless"/"clean") opening and ending is covered, since a miss here lets
+# the file's trailing " - 01" be read as an episode number.
+_ANIME_EXTRA_STRONG_RE = re.compile(
+    r"""(?<![A-Za-z0-9])(?:
+          (?:
+              nc [ ._-]? (?: opening | ending | op | ed | bd )              # NCOP, NC-OP, NC_ED, NC BD
+            | non [ ._-]? credits? (?: [ ._-]? (?: opening|ending|op|ed ) )?   # "Non-Credit OP"
+            | clean [ ._-] (?: opening | ending | op | ed )                # "Clean OP" -- the separator is
+          )                                                                # REQUIRED, or "Cleaned" matches
+          \d*                                                              # "NCOP1", "NCOP01", "Clean OP1"
+        | creditless
+        | textless
+        | omake
+    )(?![A-Za-z0-9])""",
+    re.VERBOSE | re.IGNORECASE,
+)
+
+# Too short or too ordinary to trust alone: "CM"/"PV" are also release-group tags, "Menu" is a
+# plausible episode title, and "Trailer" is a real show name ("Trailer Park Boys"). Only treat these
+# as bonus content when they carry the fansub extras numbering that always follows them
+# ("Date A Live IV CM - 01", "Date A Live IV BD1 Menu - 01").
+_ANIME_EXTRA_NUMBERED_RE = re.compile(
+    r"""(?<![A-Za-z0-9])(?:
+          cm                                       # commercial
+        | pv                                       # promotional video
+        | trailer
+        | teaser
+        | (?: bd | dvd | disc ) \d* [ ._-]* menu   # "BD1 Menu"
+    )(?![A-Za-z0-9])
+    [ ._-]*-[ ._-]* \d{1,3} (?![0-9])              # the " - 01" that always follows""",
+    re.VERBOSE | re.IGNORECASE,
+)
+
+# A leading "[Group]" tag is the release group, never a content marker: "[CM] Show - 01.mkv" is an
+# episode from a group called CM, not a commercial.
+_LEADING_RELEASE_GROUP_RE = re.compile(r"^\s*\[[^\]]*\]\s*")
+
+# An explicit season/episode code settles it: this is an episode, whatever else the name contains.
+# Without this, "Trailer Park Boys - S01E01.mkv" and "Show.S01E05.Trailer.Park.mkv" would be skipped
+# as bonus content and stranded forever.
+_EPISODE_CODE_RE = re.compile(r"(?<![A-Za-z0-9])s\d{1,2}[ ._-]?e\d{1,3}(?![0-9])", re.IGNORECASE)
+
+# ext4, XFS and APFS cap a single path component at 255 BYTES (not characters). Reserve headroom for
+# the extension this base name will get, plus associated files that append to it (".en.srt").
+MAX_FILENAME_BYTES = 255
+FILENAME_SUFFIX_HEADROOM = 20
+
+
+def is_anime_extra(filename: Union[Path, PathLike, str]) -> bool:
+    """
+    Check whether a file is anime bonus content (NCOP/NCED/CM/PV/disc menu) rather than an episode.
+
+    A false positive silently skips a real episode, so the weak markers must carry their numbering
+    and a leading release-group tag is ignored entirely.
+
+    :param filename: The filename to check; only the base name is examined
+    :return: ``True`` when the file is bonus content and must not be post-processed as an episode
+    """
+    name = _LEADING_RELEASE_GROUP_RE.sub("", Path(filename).name)
+    if _EPISODE_CODE_RE.search(name):
+        return False
+    return bool(_ANIME_EXTRA_STRONG_RE.search(name) or _ANIME_EXTRA_NUMBERED_RE.search(name))
+
+
+def truncate_filename(name: str, max_bytes: int = MAX_FILENAME_BYTES - FILENAME_SUFFIX_HEADROOM) -> str:
+    """
+    Shorten a single filename component so it fits the filesystem's per-component byte limit.
+
+    Truncation happens on a UTF-8 character boundary, never mid-codepoint, and trailing separator
+    punctuation is trimmed so the result does not end in " - " or a dangling comma.
+
+    Two different long names can share their first ``max_bytes`` bytes, and the move path overwrites
+    its destination, so a short digest of the FULL name is appended. Without it, a truncated episode
+    could silently overwrite a different truncated episode.
+
+    :param name: A filename component, without directory or extension
+    :param max_bytes: Byte budget for the component
+    :return: ``name`` unchanged when it already fits, otherwise a truncated and disambiguated copy
+    """
+    encoded = name.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return name
+
+    digest = f"~{hashlib.sha1(encoded).hexdigest()[:8]}"
+    if max_bytes <= len(digest):
+        # No room for the digest; honour the byte budget and accept the collision risk.
+        return encoded[:max_bytes].decode("utf-8", "ignore")
+
+    truncated = encoded[: max_bytes - len(digest)].decode("utf-8", "ignore").rstrip(" .-_&,")
+    return f"{truncated}{digest}"
+
+
 def is_rar_file(filename: Union[Path, PathLike, str]) -> bool:
     """
     Check if file is a RAR file, or part of a RAR set
@@ -344,9 +447,9 @@ def replace_extension(filename: Union[Path, PathLike, str], new_extension: str) 
         return filename
     if not path.suffix:
         return filename
-    else:
-        if new_extension and not new_extension.startswith("."):
-            new_extension = f".{new_extension}"
+
+    if new_extension and not new_extension.startswith("."):
+        new_extension = f".{new_extension}"
 
     return type(filename)(path.with_suffix(new_extension))
 
@@ -372,7 +475,19 @@ def sanitize_filename(filename):
     return ""
 
 
-def try_int(candidate, default_value=0):
+def valid_url(url):
+    try:
+        valid = validators.url(url)
+    except validators.utils.ValidationError:
+        valid = False  # ValidationError isn't an exception so doesn't actually get here
+
+    if not valid:
+        valid = False  # if ValidationError in response set to False
+
+    return valid
+
+
+def try_int(candidate, default_value=0) -> int:
     """
     Try to convert ``candidate`` to int, or return the ``default_value``.
     :param candidate: The value to convert to int
@@ -386,7 +501,7 @@ def try_int(candidate, default_value=0):
         return default_value
 
 
-def try_float(candidate, default_value=0):
+def try_float(candidate, default_value=0) -> float:
     """
     Try to convert ``candidate`` to int, or return the ``default_value``.
     :param candidate: The value to convert to int
@@ -427,6 +542,6 @@ def choose_data_dir(program_dir) -> Path:
     proper_data_dir = Path(appdirs.user_config_dir(appname="sickchill"))
     for location in [old_data_dir, old_profile_path, proper_data_dir]:
         for check in ["sickbeard.db", "sickchill.db", "config.ini"]:
-            if location.joinpath(check).exists():
+            if os.access(location.joinpath(check), os.R_OK):
                 return location.resolve()
     return proper_data_dir.resolve()

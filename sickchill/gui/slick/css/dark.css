@@ -845,3 +845,38 @@ new #confirmBox
 .modal-footer button.cancel:hover {
     background-color: #A13331;
 }
+
+/* =======================================================================
+bootstrap .table (e.g. AI Usage & Costs tables) - dark theme overrides.
+vendor.min.css striped rows default to a near-white #f9f9f9, which is
+unreadable against the dark theme's white text. Reuse the tablesorter palette.
+========================================================================== */
+
+.table {
+    color: #FFFFFF;
+    background-color: transparent;
+}
+
+.table > thead > tr > th {
+    background-color: #15528F;
+    color: #FFFFFF;
+    border-color: #222222;
+}
+
+.table > tbody > tr > td,
+.table > tbody > tr > th,
+.table > tfoot > tr > td {
+    border-color: #222222;
+}
+
+.table-striped > tbody > tr:nth-of-type(odd) {
+    background-color: #333333;
+}
+
+.table-striped > tbody > tr:nth-of-type(even) {
+    background-color: #2E2E2E;
+}
+
+.table-hover > tbody > tr:hover {
+    background-color: #2A2A2A;
+}

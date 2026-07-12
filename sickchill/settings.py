@@ -4,13 +4,12 @@ from typing import TYPE_CHECKING
 
 import rarfile
 
+from sickchill.init_helpers import setup_gettext, sickchill_dir
 from sickchill.oldbeard.common import SD
 from sickchill.oldbeard.numdict import NumDict
 
-from .init_helpers import setup_gettext, sickchill_dir
-
 if TYPE_CHECKING:
-    from .movies import MovieList
+    from sickchill.movies import MovieList
 
 setup_gettext()
 
@@ -63,6 +62,64 @@ WHITELIST_DEFAULT = ""
 BLACKLIST_DEFAULT = ""
 ANIME_SPLIT_HOME = False
 ANIME_SPLIT_HOME_IN_TABS = False
+
+# AI Configuration - Master Settings
+AI_ENABLED = False
+AI_REQUEST_TIMEOUT = 120  # seconds; CLI extended-thinking batches need headroom (clamp 30..300)
+AI_CONFIDENCE_THRESHOLD = 0.80
+AI_NOTIFY_ON_FALLBACK_FAILURE = True
+
+# AI Provider selection: "api" (Anthropic API key / BYOK) or "cli" (local Claude Code CLI login)
+AI_PROVIDER = "api"
+
+# Anthropic API Settings
+ANTHROPIC_API_KEY = None
+ANTHROPIC_MODEL = "claude-sonnet-4-6"
+
+# Claude Code CLI provider settings (used when AI_PROVIDER == "cli")
+AI_CLI_PATH = ""  # optional explicit path to the `claude` binary ("" = auto-detect on PATH)
+AI_CLI_MODEL = "sonnet"  # model alias ("sonnet"/"opus"/"haiku") or a full model id
+# Reasoning effort passed to the CLI as `--effort`. The CLI defaults to high effort, which makes
+# the model generate thousands of internal "thinking" tokens for batched matching tasks (slow, and
+# it can exceed AI_REQUEST_TIMEOUT). "low" is the right default for SickChill's bounded classification
+# tasks; raise it only if match quality suffers. Also drives the search-matcher batch size.
+AI_CLI_EFFORT = "low"  # one of: low / medium / high / xhigh / max
+
+# AI Throttling / Budgeting
+AI_MAX_CALLS_PER_HOUR = 20
+AI_MAX_CALLS_PER_DAY = 200
+AI_CACHE_TTL_DAYS = 30
+
+# AI Search (Fallback) Settings
+AI_SEARCH_ENABLED = False
+# NOTE: AI search only runs as a fallback after rule-based selection fails, so
+# AI_SEARCH_ONLY_ON_FAILURE=False does not currently enable "always consult AI" (see
+# show_preferences.should_use_ai_search). Kept persisted for forward-compat.
+AI_SEARCH_ONLY_ON_FAILURE = True
+AI_SEARCH_COOLDOWN_DAYS_PER_SHOW = 7
+AI_SEARCH_MIN_RESULTS = 1
+# Reserved: an AI error already falls through to "no result" without blocking, so this flag is
+# not currently read by any logic (only persisted/exposed in the UI).
+AI_SEARCH_FALLBACK_TO_RULES_ON_ERROR = True
+AI_SEARCH_ALLOW_RELAX_FILTERS = False
+# Include the per-match free-text "reasoning" field in the AI search-matcher response. It is
+# diagnostic-only (never used in matching) and, multiplied across a batch, dominates output token
+# count and generation time (the Claude CLI ignores max_tokens), which can blow past the request
+# timeout. Default off: the model still reasons internally, it just does not emit the prose.
+AI_SEARCH_MATCH_INCLUDE_REASONING = False
+
+# AI Post-Processing (Fallback Match) Settings
+AI_POSTPROCESS_MATCH_ENABLED = False
+AI_POSTPROCESS_MATCH_ONLY_ON_FAILURE = True
+AI_POSTPROCESS_MATCH_COOLDOWN_HOURS_PER_FILE = 1
+AI_POSTPROCESS_MATCH_MIN_CONFIDENCE = 0.85
+
+# AI Post-Processing (Optional Analysis) Settings
+AI_POSTPROCESS_ANALYZE_ENABLED = False
+AI_POSTPROCESS_VERIFY_QUALITY = True
+AI_POSTPROCESS_DETECT_ISSUES = True
+AI_POSTPROCESS_SUGGEST_METADATA = False
+
 ANON_REDIRECT = None
 DEFAULT_ANON_REDIRECT = "https://anon.to/?"
 API_KEY = None
@@ -190,6 +247,8 @@ INDEXER_TIMEOUT = None
 INIT_LOCK = Lock()
 ITASA_PASS = None
 ITASA_USER = None
+JELLYFIN_APIKEY = None
+JELLYFIN_HOST = None
 JOIN_APIKEY = ""
 JOIN_ID = ""
 JOIN_NOTIFY_ONDOWNLOAD = False
@@ -235,6 +294,7 @@ METADATA_WDTV = None
 MIN_AUTOPOSTPROCESSOR_FREQUENCY = 1
 MIN_BACKLOG_FREQUENCY = 10
 MIN_DAILYSEARCH_FREQUENCY = 10
+MIN_FAILED_DOWNLOAD_POLL_FREQUENCY = 1
 MIN_UPDATE_FREQUENCY = 1
 MOVE_ASSOCIATED_FILES = False
 MY_ARGS = []
@@ -301,6 +361,9 @@ OMGWTFNZBS_APIKEY = None
 OMGWTFNZBS_USERNAME = None
 OPENSUBTITLES_PASS = None
 OPENSUBTITLES_USER = None
+
+OPENSUBTITLESCOM_PASS = None
+OPENSUBTITLESCOM_USER = None
 PID = None
 PIDFILE = ""
 PLEX_CLIENT_HOST = None
@@ -425,6 +488,7 @@ SUBTITLES_DEFAULT = False
 SUBTITLES_DIR = ""
 SUBTITLES_EXTRA_SCRIPTS = []
 SUBTITLES_FINDER_FREQUENCY = 1
+SUBTITLES_FOREIGN_ONLY = False
 SUBTITLES_HEARING_IMPAIRED = False
 SUBTITLES_HISTORY = False
 SUBTITLES_INCLUDE_SPECIALS = True
@@ -530,7 +594,26 @@ USE_BOXCAR2 = False
 USE_DISCORD = False
 USE_EMAIL = False
 USE_EMBY = False
+USE_JELLYFIN = False
 USE_FAILED_DOWNLOADS = False
+# How often to ask the download client what became of the episodes we snatched, in minutes.
+FAILED_DOWNLOAD_POLL_FREQUENCY = 5
+# A job the client cannot account for is treated as failed only after this many consecutive polls have found
+# it in neither the queue nor the history, AND this long has passed since we snatched it.
+FAILED_DOWNLOAD_ABSENT_CYCLES = 3
+FAILED_DOWNLOAD_VANISHED_HOURS = 12
+# The client says it downloaded, but post-processing never picked the episode up. Warn after this long.
+FAILED_DOWNLOAD_PP_STUCK_HOURS = 6
+# Stop tracking a completed-but-unimported download after this long. The episode is left as it is.
+FAILED_DOWNLOAD_ROW_TTL_DAYS = 14
+# Backstop for a download the client will not account for at all. Never fails the episode.
+FAILED_DOWNLOAD_ROW_MAX_AGE_DAYS = 60
+# Give up retrying a failed download after this many attempts.
+FAILED_DOWNLOAD_MAX_ENQUEUES = 3
+# Delete a job from the download client (with its files, including SAB's _FAILED_ folder in the completed
+# dir) once the client has declared it Failed and every episode of the job has been handed to retry.
+# Destructive, so opt-in: the files are the client's failed remnants, but they are files.
+FAILED_DOWNLOAD_CLIENT_CLEANUP = False
 USE_FREE_SPACE_CHECK = True
 USE_FREEMOBILE = False
 USE_GOTIFY = False

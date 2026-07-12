@@ -41,10 +41,10 @@ class BS4Parser(object):
             if isinstance(parsers, str):
                 parsers = [parsers]
 
-            if language == "html":
-                extra_parsers = ["lxml", "html5lib", "html.parser"]
-            elif language == "xml":
+            if language == "xml":
                 extra_parsers = ["lxml-xml", "html.parser"]
+            else:
+                extra_parsers = ["lxml", "html5lib", "html.parser"]
 
             if parsers is None:
                 parsers = extra_parsers

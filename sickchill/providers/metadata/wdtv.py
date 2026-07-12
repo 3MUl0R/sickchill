@@ -3,11 +3,10 @@ import os
 import re
 from xml.etree import ElementTree
 
+from sickchill import logger
 from sickchill.helper.common import dateFormat, replace_extension
 from sickchill.oldbeard import helpers
-
-from ... import logger
-from . import generic
+from sickchill.providers.metadata import generic
 
 
 class WDTVMetadata(generic.GenericMetadata):
@@ -158,8 +157,7 @@ class WDTVMetadata(generic.GenericMetadata):
             indexer_episode = current_episode.idxr.episode(current_episode)
             if not indexer_episode:
                 logger.info(
-                    "Metadata writer is unable to find episode {0:d}x{1:d} of {2} on {3}..."
-                    "has it been removed? Should I delete from db?".format(
+                    "Metadata writer is unable to find episode {0:d}x{1:d} of {2} on {3}...has it been removed? Should I delete from db?".format(
                         current_episode.season, current_episode.episode, current_episode.show.name, episode_object.idxr.name
                     )
                 )

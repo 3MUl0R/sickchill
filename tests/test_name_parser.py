@@ -631,6 +631,416 @@ class BasicFailedTests(conftest.SickChillTestDBCase):
         self._test_names(name_parser, "scene_date_format", lambda x: x + ".avi")
 
 
+class SeasonRelativeAnimeTests(conftest.ResetNameCacheMixin, conftest.SickChillTestPostProcessorCase):
+    """A per-season anime release (Moozzi2-style) whose title matches a scene exception mapped to a
+    specific season must resolve season-relative (e.g. 'Show II - 5' -> S2E5), not as a series-wide
+    absolute number (which would land in season 1)."""
+
+    def test_season_specific_exception_maps_season_relative(self):
+        from sickchill.oldbeard import db, name_cache
+
+        self.show.anime = 1
+        self.show.save_to_db()
+
+        # Map an alternate title to season 2 of the test show (indexer_id 1).
+        cache_db = db.DBConnection("cache.db")
+        cache_db.action(
+            "INSERT INTO scene_exceptions (indexer_id, show_name, season, custom) VALUES (?, ?, ?, ?)",
+            [1, "show name II", 2, 1],
+        )
+        name_cache.build_name_cache()
+
+        result = parser.NameParser().parse("[Group] show name II - 5 (BD 1920x1080 x265)")
+        self.assertEqual(result.show.indexerid, 1)
+        self.assertEqual(result.season_number, 2)
+        self.assertEqual(result.episode_numbers, [5])
+
+    def test_ambiguous_multi_season_exception_stays_series_absolute(self):
+        """If a title maps to MORE than one distinct season, it is ambiguous and must NOT be
+        treated as season-relative (which would naively pick the lowest season)."""
+        from sickchill.oldbeard import db, name_cache
+
+        self.show.anime = 1
+        self.show.save_to_db()
+
+        cache_db = db.DBConnection("cache.db")
+        cache_db.action(
+            "INSERT INTO scene_exceptions (indexer_id, show_name, season, custom) VALUES (?, ?, ?, ?)",
+            [1, "show name extra", 2, 1],
+        )
+        cache_db.action(
+            "INSERT INTO scene_exceptions (indexer_id, show_name, season, custom) VALUES (?, ?, ?, ?)",
+            [1, "show name extra", 3, 1],
+        )
+        name_cache.build_name_cache()
+
+        result = parser.NameParser().parse("[Group] show name extra - 5 (BD 1920x1080 x265)")
+        # Ambiguous -> falls back to series-absolute (no absolute data on the test show), so it
+        # must NOT have been season-relative-mapped to the lowest season (2).
+        self.assertNotEqual(result.season_number, 2)
+
+
+class ResolutionGuardTests(conftest.SickChillTestDBCase):
+    """A screen resolution like 1920x1080 must not be parsed as season x episode.
+
+    Regression for BD releases such as '[Moozzi2] <title> - 16 (BD 1920x1080 x265-10Bit Flac)'
+    where the anime_and_normal_x regex used to read 1920x1080 as S1920E1080, which (combined
+    with a get_episode caching bug) poisoned anime absolute->episode resolution.
+    """
+
+    def test_resolution_not_parsed_as_season_episode(self):
+        # _parse_string returns the raw regex parse without the show-resolution that parse() requires.
+        name_parser = parser.NameParser(naming_pattern=True)
+        for name in [
+            "[Moozzi2] Some Anime Title - 16 (BD 1920x1080 x265-10Bit Flac)",
+            "[Group] Another Show - 05 (BD 1280x720)",
+            "Show Title - 07 (3840x2160)",
+        ]:
+            result = name_parser._parse_string(name)
+            for resolution_width in (1920, 1280, 3840):
+                self.assertNotEqual(result.season_number, resolution_width, f"{name!r} parsed width as a season")
+            for resolution_height in (1080, 720, 2160):
+                self.assertNotIn(resolution_height, result.episode_numbers or [], f"{name!r} parsed height as an episode")
+
+    def test_real_nxm_still_parses(self):
+        # A genuine NxM episode notation must still work.
+        name_parser = parser.NameParser(naming_pattern=True)
+        result = name_parser._parse_string("Some Show 3x05 720p")
+        self.assertEqual(result.season_number, 3)
+        self.assertEqual(result.episode_numbers, [5])
+
+
+class SceneAnimeSeasonRelativeTests(conftest.ResetNameCacheMixin, conftest.SickChillTestPostProcessorCase):
+    """Regression for the within-season mis-numbering bug (Fix B).
+
+    For a SCENE-numbered anime, the absolute number is run through scene->indexer conversion, so the
+    parsed release number ``epAbsNo`` and the converted value ``a`` differ. The season-relative
+    interpretation must use the RAW ``epAbsNo`` as the within-season episode. The old code used the
+    scene-converted ``a``: e.g. "Show II - 5" -> a=15 and, because S2E15 existed, it wrongly mapped to
+    S2E15. (This is exactly how the K-ON S2 BD scattered across S2E13-E26.)
+    """
+
+    def _seed_scene_absolute(self, scene_absolute_number, scene_season, absolute_number, season, episode):
+        from sickchill.oldbeard import db
+
+        main_db = db.DBConnection()
+        main_db.action(
+            "INSERT OR REPLACE INTO scene_numbering "
+            "(indexer, indexer_id, season, episode, absolute_number, scene_season, scene_episode, scene_absolute_number) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [1, 1, season, episode, absolute_number, scene_season, episode, scene_absolute_number],
+        )
+
+    def _make_scene_anime_with_season2_exception(self):
+        from sickchill.oldbeard import db, name_cache
+
+        self.show.anime = 1
+        self.show.scene = 1
+        self.show.save_to_db()
+
+        cache_db = db.DBConnection("cache.db")
+        cache_db.action(
+            "INSERT INTO scene_exceptions (indexer_id, show_name, season, custom) VALUES (?, ?, ?, ?)",
+            [1, "show name II", 2, 1],
+        )
+        name_cache.build_name_cache()
+
+    def test_scene_season_relative_uses_raw_episode_not_converted_absolute(self):
+        self._make_scene_anime_with_season2_exception()
+        # scene-absolute 5 in season 2 converts to indexer absolute 15; S2E15 exists on the test show,
+        # which is what made the old code mis-map "show name II - 5" to S2E15.
+        self._seed_scene_absolute(scene_absolute_number=5, scene_season=2, absolute_number=15, season=2, episode=5)
+
+        result = parser.NameParser().parse("[Group] show name II - 5 (BD 1920x1080 x265)")
+        self.assertEqual(result.show.indexerid, 1)
+        self.assertEqual(result.season_number, 2)
+        self.assertEqual(result.episode_numbers, [5])  # must be E5 (raw), not E15 (scene-converted absolute)
+
+    def test_scene_nonexistent_season_relative_refuses_a_cross_season_fallback(self):
+        """When the raw number is NOT a valid episode in the mapped season, the series-absolute
+        fallback fires -- but the franchise gate refuses it when it would land OUTSIDE the season
+        the alias pins. "show name II - 38" with II pinned to S2 and no S2E38 used to file into
+        S3E1 on the absolute fallback; that cross-season guess is exactly the corruption class
+        the gate forbids, so the parse now refuses (ambiguous, no mapping) instead."""
+        from sickchill.oldbeard import db
+
+        self._make_scene_anime_with_season2_exception()
+        # Give S3E1 a known series-absolute number, and an identity scene mapping for that number.
+        main_db = db.DBConnection()
+        main_db.action("UPDATE tv_episodes SET absolute_number = 38 WHERE showid = 1 AND indexer = 1 AND season = 3 AND episode = 1")
+        self._seed_scene_absolute(scene_absolute_number=38, scene_season=2, absolute_number=38, season=3, episode=1)
+
+        result = parser.NameParser().parse("[Group] show name II - 38 (BD 1920x1080 x265)")
+        self.assertTrue(result.ambiguous)
+        self.assertIsNone(result.season_number)
+        self.assertEqual(result.episode_numbers, [])
+
+
+class ExplicitAnimeSeasonTests(conftest.ResetNameCacheMixin, conftest.SickChillTestPostProcessorCase):
+    """A1: a confident explicit season token in an anime release name (e.g. the search-time
+    "K-ON.S2-01" whose ".S2." is swallowed into the series name and does NOT match a scene exception)
+    is read as the season, so the release maps season-relative (S2E01) instead of to the
+    series-absolute season 1. Gated hard: only when stripping the token still resolves to THIS show,
+    and only when the (season, raw-episode) actually exists (else series-absolute fallback)."""
+
+    def _make_anime(self, scene=0):
+        self.show.anime = 1
+        self.show.scene = scene
+        self.show.save_to_db()
+
+    def _seed_alias(self, alias, season=-1):
+        """Map an alias to the show WITHOUT pinning a season (custom season -1 = whole show), so the
+        title resolves to the show at the top level but does not set season_relative_season -- exactly
+        the gap A1 fills. (Mirrors how the real "K-ON S2" resolves the show but matches no
+        season-specific exception.)"""
+        from sickchill.oldbeard import db, name_cache
+
+        cache_db = db.DBConnection("cache.db")
+        cache_db.action(
+            "INSERT INTO scene_exceptions (indexer_id, show_name, season, custom) VALUES (?, ?, ?, ?)",
+            [1, alias, season, 1],
+        )
+        name_cache.build_name_cache()
+
+    def test_explicit_s2_token_maps_season_relative(self):
+        self._make_anime()
+        self._seed_alias("show name s2")  # resolves "show name S2" -> show 1, no pinned season
+
+        result = parser.NameParser().parse("[Moozzi2] show name S2 - 03 (BD 1920x1080 x264 FLAC)")
+        self.assertEqual(result.show.indexerid, 1)
+        self.assertEqual(result.season_number, 2)
+        self.assertEqual(result.episode_numbers, [3])
+
+    def test_explicit_token_missing_episode_refuses_a_cross_season_fallback(self):
+        """When the token's (season, raw-episode) does not exist, A1 must not force the season --
+        and the franchise gate now refuses the series-absolute fallback too, because filing an
+        "S2"-titled release into S4 is the cross-season guess the gate forbids. (Previously this
+        fell through to absolute resolution and mapped S4E5.)"""
+        from sickchill.oldbeard import db
+
+        self._make_anime()
+        self._seed_alias("show name s2")
+        # The test show has no S2E99. Give a real episode the series-absolute number 99 so the
+        # old fallback WOULD have resolved deterministically (S4E5) -- proving the refusal is the
+        # gate's doing, not a parse failure.
+        main_db = db.DBConnection()
+        main_db.action("UPDATE tv_episodes SET absolute_number = 99 WHERE showid = 1 AND indexer = 1 AND season = 4 AND episode = 5")
+
+        result = parser.NameParser().parse("[Moozzi2] show name S2 - 99 (BD 1920x1080 x264 FLAC)")
+        self.assertTrue(result.ambiguous)
+        self.assertIsNone(result.season_number)
+        self.assertEqual(result.episode_numbers, [])
+
+    def test_strip_not_resolving_same_show_stays_absolute(self):
+        """Gate 1: if stripping the season token does NOT resolve to this show, the trailing number is
+        treated as part of the title (not a season) and we stay series-absolute.
+
+        The show is forced (show_object) -- as in a show-scoped search/PP -- so the anime branch is
+        reached. The full title "zzz S2" is aliased (so anime-preference selects the anime match), but
+        the stripped "zzz" is deliberately NOT in the name cache, so A1's "stripped title still
+        resolves to this show" gate fails and the explicit token is ignored."""
+        from sickchill.oldbeard import db
+
+        self._make_anime()
+        self._seed_alias("zzz s2")  # full title resolves -> reaches the anime branch; bare "zzz" does not
+        # Pin series-absolute number 3 to S1E3 so the rejected-token fallback resolves deterministically.
+        main_db = db.DBConnection()
+        main_db.action("UPDATE tv_episodes SET absolute_number = 3 WHERE showid = 1 AND indexer = 1 AND season = 1 AND episode = 3")
+
+        result = parser.NameParser(show_object=self.show).parse("[Group] zzz S2 - 03 (BD 1920x1080 x264 FLAC)")
+        self.assertEqual(result.show.indexerid, 1)
+        # A1's gate still ignores the token as a SEASON SOURCE (that is what this test pins), but
+        # the franchise gate then refuses the series-absolute S1E3 fallback outright: the title
+        # says S2, and filing it into S1 is the forbidden cross-season guess.
+        self.assertTrue(result.ambiguous)
+        self.assertIsNone(result.season_number)
+        self.assertEqual(result.episode_numbers, [])
+
+    def test_exception_season_conflicting_with_the_token_refuses(self):
+        """A1 only fills the gap when no scene exception pins a season -- but when the exception's
+        pinned season CONTRADICTS the title's explicit token, the franchise gate refuses rather
+        than letting either side win. Release text outranks alias tags in trust, and an alias tag
+        claiming an "S2"-titled release belongs to season 3 is legitimate only when actual scene
+        numbering says so (then the gate's scene-season comparison passes; see
+        test_franchise_collision.ParserChokepointTests.test_scene_divergent_token_compares_in_scene_space).
+        (Previously the exception silently won and this filed S3E5.)"""
+        self._make_anime()
+        # Pin "show name extra s2" to season 3 (a deliberately different season than the "S2" token).
+        # The show is forced so the anime branch is reached (the bare "show name extra" is not aliased).
+        self._seed_alias("show name extra s2", season=3)
+
+        result = parser.NameParser(show_object=self.show).parse("[Moozzi2] show name extra S2 - 05 (BD 1920x1080 x264 FLAC)")
+        self.assertEqual(result.show.indexerid, 1)
+        self.assertTrue(result.ambiguous)
+        self.assertIsNone(result.season_number)
+        self.assertEqual(result.episode_numbers, [])
+
+    def test_scene_show_explicit_token_uses_raw_episode(self):
+        """A1 stacked on Fix B for a SCENE anime: the explicit token supplies the season and the
+        season-relative episode is the RAW parsed number, not the scene-converted absolute."""
+        from sickchill.oldbeard import db
+
+        self._make_anime(scene=1)
+        self._seed_alias("show name s2")
+        # scene-absolute 3 in season 2 converts to indexer absolute 17; S2E17 exists on the test show,
+        # which is exactly what would mis-map "show name S2 - 3" to S2E17 if the converted value were
+        # used as the episode.
+        main_db = db.DBConnection()
+        main_db.action(
+            "INSERT OR REPLACE INTO scene_numbering "
+            "(indexer, indexer_id, season, episode, absolute_number, scene_season, scene_episode, scene_absolute_number) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [1, 1, 2, 3, 17, 2, 3, 3],
+        )
+
+        result = parser.NameParser().parse("[Moozzi2] show name S2 - 3 (BD 1920x1080 x264 FLAC)")
+        self.assertEqual(result.season_number, 2)
+        self.assertEqual(result.episode_numbers, [3])  # raw 3, not the scene-converted absolute 17
+
+
+class SeasonlessAnimeAbsoluteTests(conftest.ResetNameCacheMixin, conftest.SickChillTestPostProcessorCase):
+    """An anime release that parsed an episode number but NO season (e.g. the E-prefixed
+    'Show.Name.E04.quality-group' form, which a NORMAL regex claims as ep_num with no season) must be
+    treated as a series-wide ABSOLUTE number. Before the fix such results kept season=None, matched no
+    conversion branch, and could not be filed (they only reached the AI fallback)."""
+
+    def _make_anime(self):
+        self.show.anime = 1
+        self.show.save_to_db()
+
+    def test_e_prefixed_seasonless_number_resolves_as_absolute(self):
+        from sickchill.oldbeard import db, name_cache
+
+        self._make_anime()
+        # Give S1E4 a known series-absolute number so absolute 4 -> S1E4.
+        main_db = db.DBConnection()
+        main_db.action("UPDATE tv_episodes SET absolute_number = 4 WHERE showid = 1 AND indexer = 1 AND season = 1 AND episode = 4")
+        name_cache.build_name_cache()
+
+        result = parser.NameParser().parse("show name E04 MULTi 1080p WEB x264-AMB3R")
+        self.assertEqual(result.show.indexerid, 1)
+        self.assertEqual(result.season_number, 1)
+        self.assertEqual(result.episode_numbers, [4])
+
+    def test_season_zero_specials_not_reinterpreted(self):
+        """Anime S00E01 (specials) must be left as season 0 episode 1 -- the new branch is gated on
+        ``season_number is None``, NOT a falsy check, so season 0 does not get reinterpreted as absolute."""
+        from sickchill.oldbeard import name_cache
+
+        self._make_anime()
+        name_cache.build_name_cache()
+
+        result = parser.NameParser().parse("show name S00E01 MULTi 1080p WEB x264-AMB3R")
+        self.assertEqual(result.show.indexerid, 1)
+        self.assertEqual(result.season_number, 0)
+        self.assertEqual(result.episode_numbers, [1])
+
+    def test_nonexistent_absolute_stays_unmatched(self):
+        """A season-less number with no matching absolute episode must stay unmatched (season None) and
+        must NOT fabricate a season/episode -- status quo is to fall through to the AI fallback."""
+        from sickchill.oldbeard import name_cache
+
+        self._make_anime()
+        name_cache.build_name_cache()
+
+        # No episode has absolute_number 99 on the test show.
+        result = parser.NameParser().parse("show name E99 MULTi 1080p WEB x264-AMB3R")
+        self.assertEqual(result.show.indexerid, 1)
+        self.assertIsNone(result.season_number)
+
+    def test_season_specific_alias_with_e_prefix_maps_season_relative(self):
+        """The shared anime-absolute helper means the season-relative logic applies to the E-prefixed
+        form too: a title whose alias pins season 2 maps 'Show II E05' -> S2E5 (not series-absolute)."""
+        from sickchill.oldbeard import db, name_cache
+
+        self._make_anime()
+        cache_db = db.DBConnection("cache.db")
+        cache_db.action(
+            "INSERT INTO scene_exceptions (indexer_id, show_name, season, custom) VALUES (?, ?, ?, ?)",
+            [1, "show name II", 2, 1],
+        )
+        name_cache.build_name_cache()
+
+        result = parser.NameParser().parse("show name II E05 MULTi 1080p WEB x264-AMB3R")
+        self.assertEqual(result.show.indexerid, 1)
+        self.assertEqual(result.season_number, 2)
+        self.assertEqual(result.episode_numbers, [5])
+
+    def test_non_anime_seasonless_number_left_unmatched(self):
+        """The new branch is gated on is_anime: a NON-anime show's season-less E04 must NOT be
+        reinterpreted as a series-absolute number (behavior unchanged -- season stays None)."""
+        from sickchill.oldbeard import db, name_cache
+
+        # Explicitly mark the show NON-anime (the test DB row can carry anime=1 from a sibling test,
+        # since the harness reuses the same indexer_id across tests). Set an absolute_number to prove it
+        # is not consulted for a non-anime show. Use a release string no other test parses, because the
+        # process-global name_parser_cache is keyed by name and would otherwise return a sibling's result.
+        self.show.anime = 0
+        self.show.save_to_db()
+        main_db = db.DBConnection()
+        main_db.action("UPDATE tv_episodes SET absolute_number = 7 WHERE showid = 1 AND indexer = 1 AND season = 1 AND episode = 7")
+        name_cache.build_name_cache()
+
+        result = parser.NameParser().parse("show name E07 MULTi 1080p WEB x264-AMB3R")
+        self.assertEqual(result.show.indexerid, 1)
+        self.assertIsNone(result.season_number)
+
+
+class ResolutionNotSeasonEpisodeTests(conftest.SickChillTestDBCase):
+    """A WxH resolution token (1440x1080p, 1920x1080) must never parse as season x episode.
+
+    Live failure 2026-07-11: 'Dirty Pair Flash 2 - 04 (BDRip 1440x1080p ...)' parsed as S1440E1080
+    via the 'anime SxEE' regex, so six valid files sat unprocessable in the download folder while
+    their episodes reverted to Wanted and re-downloaded.
+    """
+
+    def __init__(self, something):
+        super().__init__(something)
+        super().setUp()
+        self.show = tv.TVShow(1, 1, "en")
+
+    def tearDown(self):
+        parser.name_parser_cache.data.clear()
+
+    def _parse(self, name, series_name, anime):
+        self.show.name = series_name
+        self.show.anime = int(anime)
+        name_parser = parser.NameParser(True, show_object=self.show)
+        return name_parser.parse(name)
+
+    def test_anime_resolution_is_not_season_episode(self):
+        name = "Dirty Pair Flash 2 - 04 (BDRip 1440x1080p x265 HEVC FLAC, AC-3 2.0x2)(Dual Audio)[sxales]"
+        try:
+            result = self._parse(name, "Dirty Pair Flash", anime=True)
+        except (parser.InvalidNameException, parser.InvalidShowException):
+            return  # refusing to parse is acceptable; inventing S1440E1080 is not
+        self.assertNotEqual(result.season_number, 1440)
+        self.assertNotIn(1080, result.episode_numbers or [])
+
+    def test_bare_resolution_is_not_season_episode(self):
+        try:
+            result = self._parse("Some Show 1920x1080 WEBRip xViD-GRP", "Some Show", anime=False)
+        except (parser.InvalidNameException, parser.InvalidShowException):
+            return
+        self.assertNotEqual(result.season_number, 1920)
+        self.assertNotIn(1080, result.episode_numbers or [])
+
+    def test_fov_still_parses(self):
+        result = self._parse("Some Fov Show 3x07 Source-GRP", "Some Fov Show", anime=False)
+        self.assertEqual(result.season_number, 3)
+        self.assertEqual(result.episode_numbers, [7])
+
+    def test_backtracking_cannot_slice_a_resolution(self):
+        # (?![pi]) alone is defeated by backtracking: 64x480p would parse as S64E48 with '0p'
+        # left over, and 1x02p as S01E00. The guard must reject the whole run, not a slice.
+        for name, series in (("Some Show 64x480p WEBRip", "Some Show"), ("Some Show 1x02p Oddity", "Some Show")):
+            try:
+                result = self._parse(name, series, anime=False)
+            except (parser.InvalidNameException, parser.InvalidShowException):
+                continue
+            self.assertNotIn((result.season_number, tuple(result.episode_numbers or ())), [(64, (48,)), (1, (0,))], name)
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         SUITE = unittest.TestLoader().loadTestsFromName("name_parser_tests.BasicTests.test_" + sys.argv[1])

@@ -2,8 +2,7 @@ import datetime
 import threading
 
 from sickchill import logger, settings
-
-from . import common, db, scheduler, search_queue, ui
+from sickchill.oldbeard import common, db, scheduler, search_queue, ui
 
 
 class BacklogSearchScheduler(scheduler.Scheduler):
@@ -126,7 +125,7 @@ class BacklogSearcher(object):
         for sql_result in sql_results:
             cur_status, cur_quality = common.Quality.splitCompositeStatus(int(sql_result["status"] or -1))
 
-            if cur_status not in {common.WANTED, common.DOWNLOADED, common.SNATCHED, common.SNATCHED_PROPER}:
+            if cur_status not in {common.WANTED, common.DOWNLOADED, common.SNATCHED, common.SNATCHED_PROPER, common.SNATCHED_BEST}:
                 continue
 
             if cur_status == common.DOWNLOADED and settings.BACKLOG_MISSING_ONLY:

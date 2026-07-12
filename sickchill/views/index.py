@@ -7,22 +7,20 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from mimetypes import guess_type
 from secrets import compare_digest
-from typing import Any
 from urllib.parse import urljoin
 
 from mako.exceptions import RichTraceback
 from tornado.concurrent import run_on_executor
-from tornado.web import authenticated, HTTPError, RequestHandler
+from tornado.web import HTTPError, RequestHandler, authenticated
 
 import sickchill.start
 from sickchill import logger, settings
 from sickchill.init_helpers import check_installed, locale_dir
+from sickchill.oldbeard import config, db, helpers, network_timezones, ui
 from sickchill.show.ComingEpisodes import ComingEpisodes
+from sickchill.views.api.webapi import function_mapper
+from sickchill.views.common import PageTemplate
 from sickchill.views.routes import Route
-
-from ..oldbeard import config, db, helpers, network_timezones, ui
-from .api.webapi import function_mapper
-from .common import PageTemplate
 
 try:
     import jwt
@@ -54,8 +52,8 @@ class BaseHandler(RequestHandler):
             if url[:3] != "api":
                 t = PageTemplate(rh=self, filename="404.mako")
                 return t.render(title="404", header=_("Oops: 404 Not Found"))
-            else:
-                return self.finish(_("Wrong API key used"))
+
+            return self.finish(_("Wrong API key used"))
 
         elif self.settings.get("debug") and "exc_info" in kwargs:
             exc_info = kwargs["exc_info"]
@@ -66,19 +64,17 @@ class BaseHandler(RequestHandler):
             self.set_header("Content-Type", "text/html")
             return self.finish(
                 """<html>
-                                 <title>{0}</title>
-                                 <body>
-                                    <h2>Error</h2>
-                                    <p>{1}</p>
-                                    <h2>Traceback</h2>
-                                    <p>{2}</p>
-                                    <h2>Request Info</h2>
-                                    <p>{3}</p>
-                                    <button onclick="window.location='{4}/errorlogs/';">View Log(Errors)</button>
-                                 </body>
-                               </html>""".format(
-                    error, error, trace_info, request_info, settings.WEB_ROOT
-                )
+                    <title>{0}</title>
+                    <body>
+                        <h2>Error</h2>
+                        <p>{1}</p>
+                        <h2>Traceback</h2>
+                        <p>{2}</p>
+                        <h2>Request Info</h2>
+                        <p>{3}</p>
+                        <button onclick="window.location='{4}/errorlogs/';">View Log(Errors)</button>
+                    </body>
+                    </html>""".format(error, error, trace_info, request_info, settings.WEB_ROOT)
             )
 
     def redirect(self, url, permanent=False, status=None):
@@ -172,7 +168,7 @@ class WebHandler(BaseHandler):
             try:
                 await self.finish(results)
             except Exception as e:
-                if 0:
+                if settings.DEVELOPER:
                     logger.debug(f"self.finish exception {e}, result {results}")
                 else:
                     logger.debug(f"self.finish exception {e}")
@@ -243,7 +239,7 @@ class WebRoot(WebHandler):
 
         episodes = {}
 
-        results = main_db_con.select("SELECT episode, season, showid " "FROM tv_episodes " "ORDER BY season, episode")
+        results = main_db_con.select("SELECT episode, season, showid FROM tv_episodes ORDER BY season, episode")
 
         for result in results:
             if result["showid"] not in episodes:
@@ -366,11 +362,16 @@ class WebRoot(WebHandler):
 @Route("/ui(/?.*)", name="ui")
 class UI(WebRoot):
     def locale_json(self):
-        lang = self.get_query_argument("lang")
+        # lang comes from the request: a locale code is a single path component, so
+        # basename() is the identity for every legitimate value and strips any
+        # separator smuggling; the realpath prefix check below still rejects "."/"..".
+        lang = os.path.basename(self.get_query_argument("lang"))
         """ Get /locale/{lang_code}/LC_MESSAGES/messages.json """
-        locale_file = os.path.normpath(f"{locale_dir}/{lang}/LC_MESSAGES/messages.json")
+        locale_base = os.path.realpath(str(locale_dir))
+        locale_file = os.path.realpath(os.path.join(locale_base, lang, "LC_MESSAGES", "messages.json"))
+        contained = locale_file.startswith(locale_base + os.sep)
 
-        if os.path.isfile(locale_file):
+        if contained and os.path.isfile(locale_file):
             self.set_header("Content-Type", "application/json")
             with open(locale_file) as content:
                 return content.read()

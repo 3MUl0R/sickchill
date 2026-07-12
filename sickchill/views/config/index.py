@@ -21,6 +21,7 @@ class Config(WebRoot):
             {"title": _("Post Processing"), "path": "config/postProcessing/", "icon": "fa fa-refresh"},
             {"title": _("Notifications"), "path": "config/notifications/", "icon": "fa fa-bell-o"},
             {"title": _("Anime"), "path": "config/anime/", "icon": "fa fa-eye"},
+            {"title": _("AI Assistant"), "path": "config/ai/", "icon": "fa fa-magic"},
         ]
 
         return menu

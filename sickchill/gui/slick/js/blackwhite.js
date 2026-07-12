@@ -25,7 +25,7 @@ function updateBlackWhiteList(showName) { // eslint-disable-line no-unused-vars
                 $.each(data.groups, (i, group) => {
                     const option = $('<option>');
                     option.attr('value', group.name);
-                    option.html(group.name + ' | ' + group.rating + ' | ' + group.range);
+                    option.text(group.name + ' | ' + group.rating + ' | ' + group.range);
                     option.appendTo('#pool');
                 });
             }
@@ -58,7 +58,7 @@ $('#addToWhite').on('click', () => {
     if (group !== '') {
         const option = $('<option>');
         option.attr('value', group);
-        option.html(group);
+        option.text(group);
         option.appendTo('#white');
         $('#addToPoolText').val('');
         $('#saveDefaultsButton').attr('disabled', false);
@@ -70,7 +70,7 @@ $('#addToBlack').on('click', () => {
     if (group !== '') {
         const option = $('<option>');
         option.attr('value', group);
-        option.html(group);
+        option.text(group);
         option.appendTo('#black');
         $('#addToPoolText').val('');
         $('#saveDefaultsButton').attr('disabled', false);

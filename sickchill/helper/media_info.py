@@ -1,13 +1,11 @@
 import binascii
+import warnings
 
-from enzyme import MKV
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
+    from enzyme import MKV
 
 from sickchill.helper.common import is_media_file
-
-try:
-    from pymediainfo import MediaInfo as mediainfo
-except (ModuleNotFoundError, RuntimeError):
-    mediainfo = None
 
 
 def _avi_screen_size(filename):
@@ -18,7 +16,7 @@ def _avi_screen_size(filename):
     :returns tuple: (width, height)
     """
     try:
-        if not filename.endswith(".avi"):
+        if filename.lower().endswith(".avi"):
             with open(filename, "rb") as f:
                 header = f.read(72)
 
@@ -45,31 +43,12 @@ def _mkv_screen_size(filename):
     :returns tuple: (width, height)
     """
     try:
-        if filename.endswith(".mkv"):
+        if filename.lower().endswith(".mkv"):
             with open(filename, "rb") as f:
                 mkv = MKV(f)
 
             return mkv.video_tracks[0].width, mkv.video_tracks[0].height
     except Exception:
-        pass
-
-    return None, None
-
-
-def _mediainfo_screen_size(filename):
-    """
-    Attempts to read the width and height of a video file, using mediainfo
-    :param filename: full path and filename to a video file
-    :type: str
-    :returns tuple: (width, height)
-    """
-    try:
-        if mediainfo:
-            _media_info = mediainfo.parse(filename)
-            for track in _media_info.tracks:
-                if track.track_type == "Video":
-                    return track.width, track.height
-    except (OSError, TypeError):
         pass
 
     return None, None
@@ -82,7 +61,11 @@ bad_files = set()
 def video_screen_size(filename):
     """
     Attempts to read the width and height of a video file,
-    first using mediainfo and then enzyme, and then a custom avi reader
+    using enzyme (mkv) and then a custom avi reader.
+
+    pymediainfo/libmediainfo is intentionally NOT used here: it can segfault the
+    whole Python interpreter on some platforms (notably Alpine/musl), and a native
+    segfault cannot be caught by try/except. See git history for _mediainfo_screen_size.
 
     :param filename: full path and filename to a video file
     :type: str
@@ -92,11 +75,7 @@ def video_screen_size(filename):
     if filename in bad_files or not is_media_file(filename):
         return None, None
 
-    # Need to implement mediainfo another way, pymediainfo 2.0 causes segfaults
-    # It's at pymedia 5 and this was never switched back
-    for method in [_mediainfo_screen_size, _mkv_screen_size, _avi_screen_size]:
-        # for method in [_mkv_screen_size, _avi_screen_size]:
-
+    for method in [_mkv_screen_size, _avi_screen_size]:
         screen_size = method(filename)
         if screen_size != (None, None):
             return screen_size

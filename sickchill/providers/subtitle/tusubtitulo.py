@@ -1,16 +1,16 @@
 import logging
 import re
 
-from babelfish import Language, language_converters, LanguageReverseConverter
+from babelfish import Language, LanguageReverseConverter, language_converters
 from guessit import guessit
 from requests import Session
 from subliminal import __short_version__
-from subliminal.cache import region, SHOW_EXPIRATION_TIME
+from subliminal.cache import SHOW_EXPIRATION_TIME, region
 from subliminal.exceptions import ProviderError
 from subliminal.matches import guess_matches
 from subliminal.providers import ParserBeautifulSoup, Provider
 from subliminal.score import get_equivalent_release_groups
-from subliminal.subtitle import fix_line_ending, Subtitle
+from subliminal.subtitle import Subtitle, fix_line_ending
 from subliminal.utils import sanitize, sanitize_release_group
 from subliminal.video import Episode
 
@@ -119,7 +119,7 @@ class TuSubtituloSubtitle(Subtitle):
 class TuSubtituloProvider(Provider):
     """TuSubtitulo Provider."""
 
-    languages = {Language("por", "BR")} | {Language(l) for l in ["cat", "eng", "glg", "por", "spa"]}
+    languages = {Language("por", "BR")} | {Language(lang) for lang in ["cat", "eng", "glg", "por", "spa"]}
     video_types = (Episode,)
     server_url = "https://www.tusubtitulo.com/"
     series_url = server_url + "series.php"

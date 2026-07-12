@@ -3,9 +3,8 @@ import posixpath
 
 from sickchill import logger, settings
 from sickchill.helper.exceptions import MultipleShowObjectsException
+from sickchill.oldbeard import helpers
 from sickchill.oldbeard.trakt_api import TraktAPI, traktException
-
-from . import helpers
 
 
 class traktTrending(object):
@@ -18,6 +17,8 @@ class traktTrending(object):
         """Get trending show information from Trakt"""
 
         trending_shows = []
+        # pre-bind so the traktException path below still has a value to return
+        black_list = False
 
         trakt_api = TraktAPI(settings.SSL_VERIFY, settings.TRAKT_TIMEOUT)
 
@@ -101,6 +102,15 @@ class traktTrending(object):
         return os.path.join(path, image_name)
 
     def cache_image(self, image_url, image_path):
+        # image_path is built from a request-supplied indexer id: rebuild it against the
+        # trakt_trending cache directory so only the filename component survives, then
+        # belt-check the resolved result (basename can still yield "." or "..")
+        cache_base = os.path.realpath(os.path.join(settings.CACHE_DIR, "images", "trakt_trending"))
+        image_path = os.path.realpath(os.path.join(cache_base, os.path.basename(image_path)))
+        if not image_path.startswith(cache_base + os.sep):
+            logger.debug(f"Refusing to cache image outside of the trakt_trending cache directory: {image_path}")
+            return
+
         # Only cache if the file does not exist yet
         if not os.path.isfile(image_path):
             helpers.download_file(image_url, image_path, session=self.session)

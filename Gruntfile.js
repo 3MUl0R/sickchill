@@ -379,7 +379,10 @@ module.exports = function (grunt) {
                 },
                 stdout: false,
                 callback(error, stdout) {
-                    const commits = stdout.trim().replaceAll(/`/gm, '').replaceAll(/^\([\w\s,.\-+_/>]+\)\s/gm, '').replaceAll(/"/gm, '\\"'); // Removes ` and tag information
+                    // Removes ` and tag information; no shell escaping here — the tag message is
+                    // passed via a file (git tag -F) so the text never goes through a shell, and
+                    // this same string is written verbatim into the changelog.
+                    const commits = stdout.trim().replaceAll(/`/gm, '').replaceAll(/^\([\w\s,.\-+_/>]+\)\s/gm, '');
                     if (commits) {
                         grunt.config('commits', commits);
                     } else {
@@ -396,7 +399,11 @@ module.exports = function (grunt) {
 
                     grunt.log.ok(('Creating tag ' + nextVersion).green);
                     sign = sign === 'true' ? '-s ' : '';
-                    return 'git tag ' + sign + nextVersion + ' -m "' + grunt.config('commits') + '"';
+                    // The commit list is arbitrary text: hand it to git via a file instead of
+                    // embedding it in a shell command (quoting differs between sh and cmd.exe).
+                    const messageFile = require('path').join(require('os').tmpdir(), 'sickchill-tag-message.txt');
+                    grunt.file.write(messageFile, grunt.config('commits'));
+                    return 'git tag ' + sign + nextVersion + ' -F "' + messageFile + '"';
                 },
                 stdout: false,
             },

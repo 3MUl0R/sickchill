@@ -127,6 +127,34 @@ class TVTests(conftest.SickChillTestDBCase):
         settings.show_list = [show]
         # TODO: implement
 
+    def test_get_episode_unresolvable_does_not_poison_cache(self):
+        """
+        An unresolvable lookup (absolute_number 0 from a mis-parse, or all-None) must not cache a
+        placeholder self.episodes[None][None]; otherwise the early cache check returns it for every
+        later absolute-number lookup and breaks anime absolute->episode resolution for the run.
+        """
+        show = TVShow(1, 1, "en")
+        show.name = "show name"
+        show.save_to_db()
+        settings.show_list = [show]
+
+        episode = TVEpisode(show, 1, 1)
+        episode.name = "ep one"
+        episode.save_to_db()
+        show.episodes = {}
+
+        # absolute_number 0 is falsy (typical mis-parse) and all-None are both unresolvable
+        assert show.get_episode(absolute_number=0) is None
+        assert show.get_episode(season=None, episode=None) is None
+        # no placeholder bucket/episode was cached under None
+        assert None not in show.episodes
+
+        # a real lookup still resolves (previously short-circuited by the cached None/None phantom)
+        real = show.get_episode(1, 1)
+        assert real is not None
+        assert real.season == 1
+        assert real.episode == 1
+
 
 if __name__ == "__main__":
     print("==================")

@@ -716,6 +716,10 @@ msgstr ""
 msgid "Backlog search started"
 msgstr ""
 
+#: sickchill/views/home.py:1551
+msgid "Backlog search started for {show_name}"
+msgstr ""
+
 #: sickchill/views/home.py:1533
 msgid "Backlog started"
 msgstr ""
@@ -2373,6 +2377,10 @@ msgstr ""
 
 #: sickchill/gui/slick/views/manage_backlogOverview.mako:65
 msgid "Force Backlog"
+msgstr ""
+
+#: sickchill/views/home.py:952
+msgid "Force Backlog Search"
 msgstr ""
 
 #: sickchill/views/home.py:813
@@ -6908,6 +6916,10 @@ msgstr ""
 msgid "Unable to set up GitHub properly. GitHub will not be available. Error: {error}"
 msgstr ""
 
+#: sickchill/views/home.py:1544
+msgid "Unable to start backlog search"
+msgstr ""
+
 #: sickchill/views/home.py:1243
 msgid "Unable to update show: {error}"
 msgstr ""
@@ -9148,4 +9160,8 @@ msgstr ""
 
 #: sickchill/views/home.py:1280
 msgid "{show_name} has been {paused_resumed}"
+msgstr ""
+
+#: sickchill/views/home.py:1545
+msgid "{show_name} is paused, unpause it first to run a backlog search."
 msgstr ""

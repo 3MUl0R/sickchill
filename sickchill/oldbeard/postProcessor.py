@@ -4,12 +4,14 @@ import os
 import re
 import stat
 import subprocess
+import threading
 from datetime import datetime
 from pathlib import Path
-from typing import List, TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, List, Union
 
 if TYPE_CHECKING:
     from processTV import ParseResult
+
     from sickchill.tv import TVShow
 
 from guessit import guessit
@@ -17,14 +19,13 @@ from guessit import guessit
 import sickchill.helper.common
 import sickchill.oldbeard.subtitles
 from sickchill import adba, logger, settings
-from sickchill.helper.common import episode_num, get_extension, is_rar_file, remove_extension, replace_extension, SUBTITLE_EXTENSIONS
+from sickchill.helper.common import SUBTITLE_EXTENSIONS, episode_num, get_extension, is_rar_file, remove_extension, replace_extension
 from sickchill.helper.exceptions import EpisodeNotFoundException, EpisodePostProcessingFailedException, ShowDirectoryNotFoundException
+from sickchill.oldbeard import common, db, helpers, notifiers, show_name_helpers
+from sickchill.oldbeard.helpers import verify_freespace
+from sickchill.oldbeard.name_parser.parser import franchise_gate, InvalidNameException, InvalidShowException, NameParser
 from sickchill.show.History import History
 from sickchill.show.Show import Show
-
-from . import common, db, helpers, notifiers, show_name_helpers
-from .helpers import verify_freespace
-from .name_parser.parser import InvalidNameException, InvalidShowException, NameParser
 
 METHOD_COPY = "copy"
 METHOD_MOVE = "move"
@@ -33,6 +34,118 @@ METHOD_SYMLINK = "symlink"
 METHOD_SYMLINK_REVERSED = "symlink_reversed"
 
 PROCESS_METHODS = [METHOD_COPY, METHOD_MOVE, METHOD_HARDLINK, METHOD_SYMLINK, METHOD_SYMLINK_REVERSED]
+
+# Source files currently being post-processed, keyed by (st_dev, st_ino) so the same file reached
+# through different mount paths still collides. All post-processing (queue tasks, the auto scanner,
+# the API) runs in this process; claiming here is what actually prevents two workers from processing
+# one file concurrently -- path-based checks cannot, and the delete-existing step makes that race
+# destructive (the loser deletes the episode file the winner just landed).
+_claimed_sources_guard = threading.Lock()
+_claimed_sources = set()
+
+# AI Post-Processing - imported lazily to avoid circular imports
+_ai_postprocess_matcher = None
+_ai_postprocess_analyzer = None
+
+
+def _get_ai_match_result(file_path, filename, folder_name, release_name=None):
+    """
+    Attempt AI matching when rule-based parsing fails.
+
+    Args:
+        file_path: Full path to the video file
+        filename: The filename only
+        folder_name: The containing folder name
+        release_name: Optional release name if known
+
+    Returns:
+        Match result dict from AI, or None
+    """
+    global _ai_postprocess_matcher
+    try:
+        if _ai_postprocess_matcher is None:
+            from sickchill.oldbeard.ai import postprocess_matcher
+
+            _ai_postprocess_matcher = postprocess_matcher
+
+        # Failure-only seam: reached only after standard parsing could not identify the file, and
+        # the show is not known yet, so we pass (None, None, []). Per-show postprocess preferences
+        # and AI_POSTPROCESS_MATCH_ONLY_ON_FAILURE=False therefore have no effect here today; see
+        # should_use_ai_postprocess.
+        if not _ai_postprocess_matcher.should_use_ai_match(None, None, []):
+            return None
+
+        return _ai_postprocess_matcher.match_file(
+            file_path=file_path,
+            filename=filename,
+            folder_name=folder_name,
+            release_name=release_name,
+        )
+    except ImportError:
+        # AI module not available
+        return None
+    except Exception as e:
+        logger.debug(f"AI matching failed: {e}")
+        return None
+
+
+def _get_ai_analysis_result(file_path, episode, quality, release_group=None):
+    """
+    Attempt AI quality verification after file is matched.
+
+    Args:
+        file_path: Full path to the video file
+        episode: The matched TVEpisode object
+        quality: The detected quality value
+        release_group: Optional release group if known
+
+    Returns:
+        Analysis result dict from AI, or None
+    """
+    global _ai_postprocess_analyzer
+    try:
+        if _ai_postprocess_analyzer is None:
+            from sickchill.oldbeard.ai import postprocess_analyzer
+
+            _ai_postprocess_analyzer = postprocess_analyzer
+
+        return _ai_postprocess_analyzer.analyze_file(
+            file_path=file_path,
+            episode=episode,
+            quality=quality,
+            release_group=release_group,
+        )
+    except ImportError:
+        # AI module not available
+        return None
+    except Exception as e:
+        logger.debug(f"AI analysis failed: {e}")
+        return None
+
+
+def _should_block_processing(analysis_result):
+    """
+    Check if AI analysis recommends blocking processing.
+
+    Args:
+        analysis_result: Result from _get_ai_analysis_result
+
+    Returns:
+        True if processing should be blocked
+    """
+    global _ai_postprocess_analyzer
+    try:
+        if _ai_postprocess_analyzer is None:
+            from sickchill.oldbeard.ai import postprocess_analyzer
+
+            _ai_postprocess_analyzer = postprocess_analyzer
+
+        return _ai_postprocess_analyzer.should_block_processing(analysis_result)
+    except ImportError:
+        return False
+    except Exception as e:
+        logger.debug(f"AI block check failed: {e}")
+        return False
 
 
 class PostProcessor(object):
@@ -84,6 +197,9 @@ class PostProcessor(object):
         self.version = None
 
         self.anidbEpisode = None
+
+        # Set when any name we tried had more than one credible episode reading. See _find_info.
+        self.saw_ambiguous_name = False
 
         self.history = History()
 
@@ -592,6 +708,17 @@ class PostProcessor(object):
         if not parse_result:
             return to_return
 
+        # The name admits more than one credible episode reading ("Ajin 2 - 12" is either absolute
+        # episode 2 or season 2 episode 12) and could not be resolved against the database. Guessing
+        # here writes the file into the wrong episode slot, so decline this name and let the caller
+        # try a more specific one.
+        if parse_result.ambiguous:
+            self._log(f"Refusing to post-process from an ambiguous name [{name}]: {parse_result.ambiguity_reason}", logger.DEBUG)
+            # Remembered for the whole _find_info() pass: if no other name yields a clean match, the
+            # file is refused outright rather than handed to the AI fallback to guess at.
+            self.saw_ambiguous_name = True
+            return to_return
+
         # show object
         show = parse_result.show
 
@@ -641,6 +768,52 @@ class PostProcessor(object):
             except Exception as error:
                 self._log(f"exception msg: {error}")
 
+    def _validate_identity(self, show, season, episodes):
+        """
+        Final validation of a candidate (show, season, episodes) identity, whatever its source
+        (history row, rule parse, AI). Returns a rejection reason, or None when the identity is
+        acceptable.
+
+        Two checks: every episode must EXIST for the show, and for an anime show every
+        release-bearing input (release name, file name, folder name -- except the download root)
+        must pass the deterministic franchise gate against the proposed season. Any veto fails
+        closed: a poisoned history row or a lucky parse of a wrong-franchise release must not
+        write bytes into a real episode's slot.
+        """
+        int_episodes = [episode for episode in episodes if isinstance(episode, int) and not isinstance(episode, bool)]
+        if len(int_episodes) != len(episodes):
+            # By the time an identity is complete, every episode must be a real int (air-by-date
+            # conversion happened earlier). A bool or leftover date means the identity is not
+            # trustworthy; reject it whole rather than validating a filtered subset.
+            return "the episode list contains non-integer entries"
+        if int_episodes and isinstance(season, int) and not isinstance(season, bool):
+            main_db_con = db.DBConnection()
+            for episode in int_episodes:
+                if not main_db_con.select_one(
+                    "SELECT 1 FROM tv_episodes WHERE showid = ? AND indexer = ? AND season = ? AND episode = ?",
+                    [show.indexerid, show.indexer, season, episode],
+                ):
+                    return f"S{season}E{episode} does not exist for {show.name}"
+
+        if getattr(show, "is_anime", False) and isinstance(season, int) and not isinstance(season, bool):
+            scene_season = None
+            if int_episodes:
+                try:
+                    scene_season = getattr(show.get_episode(season, int_episodes[0]), "scene_season", None)
+                except Exception:
+                    scene_season = None
+            download_root = os.path.basename((settings.TV_DOWNLOAD_DIR or "").rstrip("\\/"))
+            for label, name in (("release name", self.release_name), ("file name", self.filename), ("folder name", self.folder_name)):
+                if not name:
+                    continue
+                if label == "folder name" and download_root and name == download_root:
+                    continue
+                allowed, reason = franchise_gate(name, show, season, scene_season=scene_season)
+                if not allowed:
+                    return f"the {label} [{name}] fails the franchise check: {reason}"
+
+        return None
+
     def _find_info(self):
         """
         For a given file try to find the showid, season, and episode.
@@ -668,6 +841,9 @@ class PostProcessor(object):
 
         # attempt every possible method to get our info
         for cur_attempt in attempt_list:
+            # A candidate rejected by _validate_identity must not leave its fields behind for a
+            # later attempt to build on; roll back to this snapshot and keep iterating.
+            snapshot = (show, season, list(episodes), quality, version)
             try:
                 cur_show, cur_season, cur_episodes, cur_quality, cur_version = cur_attempt()
             except (InvalidNameException, InvalidShowException) as error:
@@ -738,7 +914,64 @@ class PostProcessor(object):
                     season = 1
 
             if show and season and episodes:
+                rejection = self._validate_identity(show, season, episodes)
+                if rejection:
+                    self._log(f"Rejecting this source's identity for the file: {rejection}", logger.INFO)
+                    show, season, episodes, quality, version = snapshot
+                    continue
                 return show, season, episodes, quality, version
+
+        # An ambiguous name is not a parsing failure the AI can rescue -- it is a name with two
+        # credible readings that the database could not settle. Letting the AI pick one is still a
+        # guess, and a wrong guess writes the file into a real episode's slot. Refuse the whole file.
+        if self.saw_ambiguous_name and (not show or season is None or not episodes):
+            self._log(_("Refusing to post-process: the release name is ambiguous and could not be resolved against the database"), logger.WARNING)
+            return None, None, [], None, None
+
+        # If normal matching failed, try AI fallback
+        if not show or season is None or not episodes:
+            self._log("Normal parsing failed, attempting AI fallback...", logger.DEBUG)
+            ai_result = _get_ai_match_result(
+                file_path=self.directory,
+                filename=self.filename,
+                folder_name=self.folder_name,
+                release_name=self.release_name,
+            )
+
+            if ai_result and ai_result.get("show_indexer_id", -1) > 0:
+                # Try to get the show from the AI match result
+                try:
+                    ai_show = Show.find(settings.show_list, ai_result["show_indexer_id"])
+                    if ai_show:
+                        show = ai_show
+                        ai_season = ai_result.get("season")
+                        ai_episodes = ai_result.get("episodes", [])
+
+                        if ai_season is not None:
+                            season = ai_season
+                        if ai_episodes:
+                            episodes = ai_episodes
+
+                        self._log(f"AI matched file to {show.name} S{season}E{episodes} (confidence: {ai_result.get('confidence', 0):.0%})", logger.INFO)
+                except Exception as e:
+                    self._log(f"Failed to load AI-matched show: {e}", logger.DEBUG)
+            else:
+                # No usable AI match. This is the common reason an anime file with only an
+                # absolute number "silently" fails to post-process; make it explicit (the
+                # throttle logs the specific block reason — budget/cooldown — at DEBUG).
+                self._log(
+                    "AI fallback did not return a usable match (no confident match, or blocked by AI throttle/cooldown); "
+                    "cannot determine the episode for this file",
+                    logger.INFO,
+                )
+
+        # Exit belt: whatever completion path produced this identity (including the AI return,
+        # which the matcher already validated once), it does not leave this method unvalidated.
+        if show and season is not None and episodes:
+            rejection = self._validate_identity(show, season, episodes)
+            if rejection:
+                self._log(f"Refusing to post-process: {rejection}", logger.WARNING)
+                return None, None, [], None, None
 
         return show, season, episodes, quality, version
 
@@ -910,6 +1143,29 @@ class PostProcessor(object):
 
     def process(self):
         """
+        Post-process a given file, holding an exclusive in-process claim on it for the duration.
+
+        :return: True on success, False on failure
+        """
+        try:
+            file_stat = os.stat(self.directory)
+            claim_key = (file_stat.st_dev, file_stat.st_ino)
+        except OSError:
+            # let _process report the missing file the way it always has
+            return self._process()
+
+        with _claimed_sources_guard:
+            if claim_key in _claimed_sources:
+                raise EpisodePostProcessingFailedException(_("Another post-processor is already handling this file"))
+            _claimed_sources.add(claim_key)
+        try:
+            return self._process()
+        finally:
+            with _claimed_sources_guard:
+                _claimed_sources.discard(claim_key)
+
+    def _process(self):
+        """
         Post-process a given file
 
         :return: True on success, False on failure
@@ -932,12 +1188,17 @@ class PostProcessor(object):
 
         # reset per-file stuff
         self.in_history = False
+        self.saw_ambiguous_name = False
 
         # reset the anidb episode object
         self.anidbEpisode = None
 
         # try to find the file info
         (show, season, episodes, quality, version) = self._find_info()
+        if self.saw_ambiguous_name and not show:
+            # Distinct from "show not in your list": we know the show, we just cannot tell which
+            # episode this is, and guessing would overwrite a real one.
+            raise EpisodePostProcessingFailedException(_("Ambiguous release name; refusing to guess which episode this is"))
         if not show:
             self._log(_("This show isn't in your list, you need to add it to SC before post-processing an episode"))
             raise EpisodePostProcessingFailedException()
@@ -948,6 +1209,7 @@ class PostProcessor(object):
         # retrieve/create the corresponding TVEpisode objects
         episode_object = self._get_ep_obj(show, season, episodes)
         old_ep_status_, old_ep_quality = common.Quality.splitCompositeStatus(episode_object.status)
+        self._log(_("Processing as - {pretty_name}").format(pretty_name=episode_object.pretty_name))
 
         # get the quality of the episode we're processing
         if quality and not common.Quality.qualityStrings[quality] == "Unknown":
@@ -1020,6 +1282,19 @@ class PostProcessor(object):
         else:
             self._log(_("This download is marked a priority download so I'm going to replace an existing file if I find one"))
 
+        # Optional AI quality verification (if enabled)
+        # Run after priority/existing file checks to avoid wasting AI calls on files that would be skipped
+        ai_analysis = _get_ai_analysis_result(
+            file_path=self.directory,
+            episode=episode_object,
+            quality=new_ep_quality,
+            release_group=self.release_group,
+        )
+        if _should_block_processing(ai_analysis):
+            issues = ai_analysis.get("issues", []) if ai_analysis else []
+            self._log(_("AI analysis detected issues, blocking processing: {issues}").format(issues=issues), logger.WARNING)
+            return False
+
         # try to find out if we have enough space to perform the copy or move action.
         if settings.USE_FREE_SPACE_CHECK:
             if not helpers.is_file_locked(self.directory):
@@ -1030,6 +1305,13 @@ class PostProcessor(object):
                     return False
             else:
                 self._log(_("Unable to determine needed file space as the source file is locked for access"))
+
+        # Refuse to delete anything until the source file is confirmed present and readable (movable, for
+        # the methods that relocate it). A concurrent processor reaching this directory through another
+        # path can have consumed the source already; deleting the existing episode files on its behalf
+        # would throw away the file that processor just landed while the DB keeps pointing at it.
+        if helpers.is_file_locked(self.directory, self.process_method in (METHOD_MOVE, METHOD_SYMLINK)):
+            raise EpisodePostProcessingFailedException(_("File is locked for reading/writing"))
 
         # delete the existing file (and company)
         for cur_ep in [episode_object] + episode_object.related_episodes:
@@ -1206,6 +1488,9 @@ class PostProcessor(object):
             # do the library update for EMBY
             notifiers.emby_notifier.update_library(episode_object.show)
 
+            # do the library update for JELLYFIN
+            notifiers.jellyfin_notifier.update_library(episode_object.show)
+
             # do the library update for NMJ
             # nmj_notifier kicks off its library update when the notify_download is issued (inside notifiers)
 
@@ -1233,9 +1518,14 @@ class PostProcessor(object):
 
 
 def guessit_findit(name: str) -> Union["ParseResult", None]:
-    logger.debug(f"Trying a new way to verify if we can parse this file")
+    logger.debug(f"Trying a new way to verify if we can parse this file; {name}")
     title = guessit(name, {"type": "episode"}).get("title")
+
     if title:
+        # if the title is a list instead of a string, then join it with spaces.
+        if isinstance(title, list):
+            title = " ".join(title)
+
         show: "TVShow" = helpers.get_show(title)
         if show:
             try:

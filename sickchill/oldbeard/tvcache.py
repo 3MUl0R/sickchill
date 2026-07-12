@@ -1,23 +1,35 @@
 import datetime
-import itertools
 import re
 import time
 import traceback
+from collections import defaultdict
 from urllib.parse import urlparse
 
-import validators
-
 from sickchill import logger, settings
-from sickchill.helper.common import convert_size, try_int
+from sickchill.helper.common import convert_size, try_int, valid_url
 from sickchill.helper.exceptions import AuthException
+from sickchill.oldbeard import db, show_name_helpers
 from sickchill.oldbeard.bs4_parser import BS4Parser
+from sickchill.oldbeard.databases import cache
+from sickchill.oldbeard.name_parser.parser import franchise_gate, InvalidNameException, InvalidShowException, NameParser
 from sickchill.show.Show import Show
 
-from . import db, show_name_helpers
-from .databases import cache
-from .name_parser.parser import InvalidNameException, InvalidShowException, NameParser
-
 provider_cache_db = {}
+
+
+def gate_cached_anime_row(name, show_obj, season, scene_season=None):
+    """
+    Centralized franchise-consistency check for a cached ``results`` row about to be USED --
+    by automated cache reads (find_needed_episodes), the manual-search listing, and the manual
+    snatch endpoint alike. Rows predating the gate (or written by any other path) are validated
+    on the way out, so no purge of historical rows is needed. True = the row may be served.
+    """
+    if not show_obj or not getattr(show_obj, "is_anime", False):
+        return True
+    allowed, reason = franchise_gate(name, show_obj, season, scene_season=scene_season)
+    if not allowed:
+        logger.debug(f"Ignoring cached result {name}: {reason}")
+    return allowed
 
 
 class RSSTorrentMixin:
@@ -36,7 +48,7 @@ class RSSTorrentMixin:
 
     @classmethod
     def check_link(cls, link, url):
-        return urlparse(link).netloc == urlparse(url).netloc or validators.url(link) is True or link.startswith("magnet")
+        return urlparse(link).netloc == urlparse(url).netloc or valid_url(link) is True or link.startswith("magnet")
 
     @classmethod
     def parse_feed_item(cls, item, url, size_units=None):
@@ -176,6 +188,10 @@ class CacheDBConnection(db.DBConnection):
 
 
 class TVCache(RSSTorrentMixin):
+    # Bounds the IN (...) list in find_needed_episodes. SQLITE_MAX_VARIABLE_NUMBER is 999 on older
+    # builds, 32766 on newer ones; 500 plus the provider leaves room under both.
+    SHOW_ID_CHUNK = 500
+
     def __init__(self, provider, **kwargs):
         self.provider = provider
         self.provider_id = self.provider.get_id()
@@ -354,6 +370,13 @@ class TVCache(RSSTorrentMixin):
             if not parse_result or not parse_result.series_name:
                 return None
 
+        # An ambiguous ANIME parse carries numbers the parser refused to stand behind (franchise
+        # gate veto or an unresolved reading); caching them would serve a guess to every later
+        # search. Non-anime ambiguous entries keep their historical caching behavior.
+        if getattr(parse_result, "ambiguous", False) and parse_result.show is not None and parse_result.show.is_anime:
+            logger.debug(f"Not caching the ambiguous anime result {name}: {parse_result.ambiguity_reason}")
+            return None
+
         # if we made it this far then lets add the parsed result to cache for usage later on
         season = parse_result.season_number if parse_result.season_number else 1
         episodes = parse_result.episode_numbers
@@ -419,9 +442,74 @@ class TVCache(RSSTorrentMixin):
         propers_results = cache_db_con.select(sql, [self.provider_id])
         return [x for x in propers_results if x["indexerid"]]
 
+    @staticmethod
+    def _cache_row_keys(row):
+        """Yield a (indexerid, season, episode) key for each distinct episode a cached row names.
+
+        This stands in for `episodes LIKE '%|N|%'`, so it has to reproduce that predicate exactly:
+
+        * `LIKE` is NUL-terminated -- `length("\\0|1|")` is 0, not 4 -- so anything at or past the
+          first NUL is invisible to it.
+        * A number only matches when a pipe flanks it on both sides, so "1|2" matches neither 1 nor 2.
+        * "|1|1|" satisfies the predicate once, not twice, hence the dedupe.
+
+        Keys carry the raw column values. SQLite matches `indexerid = 10` against an INTEGER or an
+        equal-valued REAL and nothing else, which is what Python's == and hash already do; coercing
+        with int() would additionally fold 10.5 and b"10" onto 10.
+        """
+        episodes = row["episodes"]
+        if not isinstance(episodes, str):
+            # NULL never satisfied the LIKE. A BLOB does, but then dies in the split("|")[1] below,
+            # taking the whole provider's search with it. add_cache_entry writes neither.
+            return
+
+        indexerid, season = row["indexerid"], row["season"]
+        seen = set()
+        for token in episodes.split("\x00", 1)[0].split("|")[1:-1]:
+            if token and token not in seen:
+                seen.add(token)
+                yield indexerid, season, token
+
+    def _cached_results_for_episodes(self, cache_db_con, episode):
+        """Return the cached rows wanted by `episode`, a list of episode objects.
+
+        This replaces a query per wanted episode, which on a large library held the cache.db lock for
+        a quarter of an hour and blocked post-processing along with it. The wanted shows' rows are
+        fetched once, then the episode list is replayed in order, so the result is what the old
+        queries produced: the same rows, with the same duplicates, in the same order.
+
+        Callers must pass episode objects whose show.indexerid, season and episode are ints, and whose
+        wantedQuality is a list of ints. wanted_episodes() and TVShow.get_episode() guarantee it. The
+        keys below compare raw values, so a str season would silently match nothing.
+        """
+        rows_by_episode = defaultdict(list)
+        show_ids = sorted({episode_object.show.indexerid for episode_object in episode})
+        for offset in range(0, len(show_ids), self.SHOW_ID_CHUNK):
+            chunk = show_ids[offset : offset + self.SHOW_ID_CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            # ORDER BY rowid pins the order the per-episode queries only happened to produce -- SQLite
+            # promises none without it. pick_best_result sorts stably, so ties go to whichever result
+            # arrived first. Chunks partition on indexerid, so a show's rows never straddle two of them.
+            for row in cache_db_con.select(
+                f"SELECT * FROM results WHERE provider = ? AND indexerid IN ({placeholders}) ORDER BY rowid",
+                [self.provider_id, *chunk],
+            ):
+                for key in self._cache_row_keys(row):
+                    rows_by_episode[key].append(row)
+
+        sql_results = []
+        for episode_object in episode:
+            # wantedQuality holds ints, and quality is a TEXT column that the replaced SQL compared
+            # against integer literals under TEXT affinity -- that is, against their canonical decimal
+            # form. Match that. int() would also accept "08", " 8" and b"8".
+            qualities = {str(quality) for quality in episode_object.wantedQuality}
+            key = (episode_object.show.indexerid, episode_object.season, str(episode_object.episode))
+            sql_results += [row for row in rows_by_episode.get(key, ()) if str(row["quality"]) in qualities]
+
+        return sql_results
+
     def find_needed_episodes(self, episode, manual_search=False, down_cur_quality=False):
         needed_eps = {}
-        cl = []
 
         cache_db_con = self.get_db()
         if not episode:
@@ -432,18 +520,7 @@ class TVCache(RSSTorrentMixin):
                 [self.provider_id, episode.show.indexerid, episode.season, "%|" + str(episode.episode) + "|%"],
             )
         else:
-            for episode_object in episode:
-                cl.append(
-                    [
-                        "SELECT * FROM results WHERE provider = ? AND indexerid = ? AND season = ? AND episodes LIKE ? AND quality IN ("
-                        + ",".join([str(x) for x in episode_object.wantedQuality])
-                        + ")",
-                        [self.provider_id, episode_object.show.indexerid, episode_object.season, "%|" + str(episode_object.episode) + "|%"],
-                    ]
-                )
-
-            sql_results = cache_db_con.mass_action(cl, fetchall=True)
-            sql_results = list(itertools.chain(*sql_results))
+            sql_results = self._cached_results_for_episodes(cache_db_con, episode)
 
         # for each cache entry
         for cur_result in sql_results:
@@ -482,6 +559,22 @@ class TVCache(RSSTorrentMixin):
                 continue
 
             episode_object = show_obj.get_episode(cur_season, cur_ep)
+
+            # A2 cross-season guard (cache layer): a cached anime result whose release name confidently
+            # names a different season than the one it is filed under must not be returned. Covers both
+            # RSS- and search-populated cache entries, which the fresh-search guard cannot see (e.g.
+            # "K-ON.S2-01" parsed/stored as S1E01 would otherwise be snatched from cache for S1).
+            if show_obj.is_anime and self.provider._release_season_conflicts(
+                cur_result["name"], {cur_season, getattr(episode_object, "scene_season", None)}
+            ):
+                logger.debug("Ignoring cached result {0}: it names a different season than it is filed under".format(cur_result["name"]))
+                continue
+
+            # Franchise gate (cache layer): rows written before the gate existed -- or by any
+            # other path -- must still pass it on the way OUT. This is what protects against
+            # every pre-fix wrong-series row without a purge.
+            if not gate_cached_anime_row(cur_result["name"], show_obj, cur_season, getattr(episode_object, "scene_season", None)):
+                continue
 
             # build a result object
             title = cur_result["name"]

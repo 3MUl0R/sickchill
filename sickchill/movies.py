@@ -10,15 +10,17 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from tmdbsimple import movies, search
 
-from . import settings
-from .oldbeard.databases import movie
-from .oldbeard.db import db_cons, db_full_path, db_locks
+from sickchill import settings
+from sickchill.oldbeard.databases import movie
 
 logger = logging.getLogger("sickchill.movie")
 
 
 class MovieList:
     def __init__(self):
+        # Deferred to avoid a cyclic import with sickchill.oldbeard.db; these names are only used here.
+        from sickchill.oldbeard.db import db_cons, db_full_path, db_locks
+
         tmdbsimple.API_KEY = settings.TMDB_API_KEY
 
         self.filename = "movies.db"
@@ -139,7 +141,7 @@ class MovieList:
         def add_tmdb_genres():
             for genre in tmdb_object["genres"]:
                 if genre["name"] not in imdb_genres:
-                    logger.debug(f'Adding tmdb genre {genre["name"]}')
+                    logger.debug(f"Adding tmdb genre {genre['name']}")
                     tmdb_data.genres.append(movie.Genres(pk=genre["name"]))
             instance.indexer_data.append(tmdb_data)
 

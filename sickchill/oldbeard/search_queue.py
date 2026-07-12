@@ -8,7 +8,7 @@ from sickchill.show.History import History
 if TYPE_CHECKING:
     from sickchill.oldbeard.databases.movie import Movie
 
-from . import common, generic_queue, search, ui
+from sickchill.oldbeard import common, db, generic_queue, search, ui
 
 BACKLOG_SEARCH = 10
 DAILY_SEARCH = 20
@@ -34,6 +34,26 @@ class SearchQueue(generic_queue.GenericQueue):
         for cur_item in self.queue:
             if isinstance(cur_item, (ManualSearchQueueItem, FailedQueueItem)) and cur_item.segment == segment:
                 return True
+        return False
+
+    def is_episode_in_queue(self, episode_object):
+        """True when a manual or failed search covering this episode is queued or currently running.
+
+        Unlike is_ep_in_queue, this matches one episode against each item's segment rather than comparing whole
+        segment lists, and it sees currentItem as well as the queue.
+        """
+        for cur_item in self.queue + [self.currentItem]:
+            if not isinstance(cur_item, (ManualSearchQueueItem, FailedQueueItem)):
+                continue
+
+            segment = cur_item.segment if isinstance(cur_item.segment, list) else [cur_item.segment]
+            for queued_episode in segment:
+                if (
+                    queued_episode.show.indexerid == episode_object.show.indexerid
+                    and queued_episode.season == episode_object.season
+                    and queued_episode.episode == episode_object.episode
+                ):
+                    return True
         return False
 
     def is_show_in_queue(self, show):
@@ -260,7 +280,14 @@ class MovieQueueItem(generic_queue.QueueItem):
 
 
 class FailedQueueItem(generic_queue.QueueItem):
-    def __init__(self, show, segment, downCurQuality=False):
+    def __init__(self, show, segment, downCurQuality=False, *, failed_releases=None, user_initiated=False):
+        """
+        :param failed_releases: {(season, episode): {release, provider, size, old_status, client_id}} as found
+            by download_status. Lets mark_failed block the release that actually failed instead of guessing at
+            the episode's most recent snatch, and restore the status the episode held before it.
+        :param user_initiated: the user asked for this retry, so mark_failed should not decline on an episode
+            that is already downloaded.
+        """
         super().__init__("Retry", FAILED_SEARCH)
         self.priority = generic_queue.QueuePriorities.HIGH
         self.name = f"RETRY-{show.indexerid}"
@@ -269,31 +296,76 @@ class FailedQueueItem(generic_queue.QueueItem):
         self.success = None
         self.started = None
         self.downCurQuality = downCurQuality
+        self.failed_releases = failed_releases or {}
+        self.user_initiated = user_initiated
+
+    def _forget_pending_download(self, episode_object, client_id):
+        """Stop tracking a download once it has been marked failed and the episode reverted.
+
+        Scoped to client_id: if the episode was snatched again while this item sat in the queue, the row now
+        describes that newer download and must be left alone.
+        """
+        db.DBConnection().action(
+            "DELETE FROM pending_downloads WHERE showid = ? AND season = ? AND episode = ? AND client_id = ?",
+            [episode_object.show.indexerid, episode_object.season, episode_object.episode, client_id],
+        )
+
+    def _episodes_to_retry(self):
+        """The episodes mark_failed accepted, which are the only ones it is safe to search for.
+
+        A declined episode is one whose download we are no longer entitled to fail: it was snatched again while
+        this item sat in the queue, or it already finished. Searching it anyway would snatch over a download
+        that is currently working, which is the exact race client_id exists to prevent.
+        """
+        if not settings.USE_FAILED_DOWNLOADS:
+            # Nothing to mark and no release to block, so mark_failed declines everything. Retry degrades to a
+            # plain search, which is what it has always done with the feature off.
+            return list(self.segment)
+
+        retryable = []
+        for episode_object in self.segment:
+            failed_release = dict(self.failed_releases.get((episode_object.season, episode_object.episode), {}))
+            client_id = failed_release.get("client_id")
+
+            if not History().mark_failed(episode_object, force=self.user_initiated, **failed_release):
+                logger.info(f"Not retrying [{episode_object.pretty_name}], it is no longer the download that failed")
+                continue
+
+            if client_id:
+                self._forget_pending_download(episode_object, client_id)
+
+            retryable.append(episode_object)
+
+        return retryable
 
     def run(self):
         super().run()
         self.started = True
 
         try:
-            for epObj in self.segment:
-                History().mark_failed(epObj)
-                logger.info(f"Beginning failed download search for: [{epObj.pretty_name}]")
-
-            # If it is wanted, self.downCurQuality doesn't matter
-            # if it isn't wanted, we need to make sure to not overwrite the existing ep that we reverted to!
-            search_result = search.search_providers(self.show, self.segment, True)
-
-            if search_result:
-                for result in search_result:
-                    # just use the first result for now
-                    logger.info(f"Downloading {result.name} from {result.provider.name}")
-                    search.snatch_episode(result)
-
-                    # give the CPU a break
-                    time.sleep(common.cpu_presets[settings.CPU_PRESET])
+            segment = self._episodes_to_retry()
+            if not segment:
+                logger.info(f"Nothing left to retry for: [{self.show.name}]")
             else:
-                pass
-                # logger.info(f"No valid episode found to retry for: [{self.segment.pretty_name}]")
+                for epObj in segment:
+                    logger.info(f"Beginning failed download search for: [{epObj.pretty_name}]")
+
+                # If it is wanted, self.downCurQuality doesn't matter
+                # if it isn't wanted, we need to make sure to not overwrite the existing ep that we reverted to!
+                # Pass is_failed_retry=True to enable more cautious AI fallback selection
+                search_result = search.search_providers(self.show, segment, True, is_failed_retry=True)
+
+                if search_result:
+                    for result in search_result:
+                        # just use the first result for now
+                        logger.info(f"Downloading {result.name} from {result.provider.name}")
+                        search.snatch_episode(result)
+
+                        # give the CPU a break
+                        time.sleep(common.cpu_presets[settings.CPU_PRESET])
+                else:
+                    pass
+                    # logger.info(f"No valid episode found to retry for: [{self.segment.pretty_name}]")
         except Exception:
             logger.debug(traceback.format_exc())
 

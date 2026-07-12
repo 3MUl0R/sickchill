@@ -32,13 +32,13 @@ def get_file_hash(filePath: Path):
         hashes = [md4_hash(data).digest() for data in a]
         if len(hashes) == 1:
             return hashes[0].hex()
-        else:
-            return md4_hash(reduce(lambda b, c: b + c, hashes, b"")).hexdigest()
+
+        return md4_hash(reduce(lambda b, c: b + c, hashes, b"")).hexdigest()
 
 
 def download_file(url, filename: Path):
     try:
-        r = requests.get(url, stream=True, verify=False)
+        r = requests.get(url, stream=True)
         r.raise_for_status()
         with filename.open("wb") as fp:
             for chunk in r.iter_content(chunk_size=1024):

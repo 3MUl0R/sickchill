@@ -26,11 +26,10 @@ import pytest
 from configobj import ConfigObj
 
 import sickchill.logger
-import sickchill.oldbeard.config
 import sickchill.oldbeard.tvcache
 import sickchill.start
 from sickchill import settings
-from sickchill.oldbeard import db, providers
+from sickchill.oldbeard import db, name_cache, providers
 from sickchill.oldbeard.databases import cache, failed, main
 from sickchill.show.indexers import ShowIndexer
 from sickchill.tv import TVEpisode, TVShow
@@ -53,6 +52,7 @@ SHOW_DIR = os.path.join(TEST_DIR, SHOW_NAME + " final")
 PROCESSING_DIR = os.path.join(TEST_DIR, "Downloads")
 NUM_SEASONS = 5
 EPISODES_PER_SEASON = 20
+
 
 # =================
 #  prepare env functions
@@ -80,7 +80,6 @@ def create_test_cache_folder():
 # =================
 #  SickChill globals
 # =================
-
 
 settings.show_list = []
 settings.QUALITY_DEFAULT = 4  # hdtv
@@ -214,6 +213,20 @@ class SickChillTestPostProcessorCase(unittest.TestCase):
         teardown_test_processing_dir()
 
 
+class ResetNameCacheMixin:
+    """Opt-in mixin: clear the process-global ``name_cache`` on teardown.
+
+    Tests that seed scene exceptions / aliases and call ``build_name_cache()`` populate the in-memory
+    ``name_cache`` module global, which the test DB teardown does not reset and so leaks into later,
+    unrelated tests (notably the post-processor tests' show resolution). Mix this in BEFORE the test
+    base class so its ``tearDown`` runs first, then chains to ``super().tearDown()``.
+    """
+
+    def tearDown(self):
+        name_cache.name_cache.clear()
+        super().tearDown()
+
+
 class TestDBConnection(db.DBConnection, object):
     """
     Test connecting to the database.
@@ -282,7 +295,7 @@ def teardown_test_db():
     #        try:
     #            os.remove(filename)
     #        except Exception as error:
-    #            print(f'ERROR: Failed to remove {filename}')
+    #            print(f"ERROR: Failed to remove {filename}")
     #            print(Exception(error))
 
 
@@ -356,7 +369,7 @@ def patch_open(open_func, files):
     return open_patched
 
 
-@pytest.fixture(autouse=True, scope="session")
+@pytest.fixture(autouse=False, scope="session")
 def cleanup_files():
     # yield
     for file in [os.path.join("tests", "sickchill.db"), os.path.join("tests", "cache.db"), os.path.join("tests", "failed.db")]:

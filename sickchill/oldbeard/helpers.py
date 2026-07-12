@@ -35,11 +35,10 @@ from urllib3 import disable_warnings
 
 import sickchill
 from sickchill import adba, logger, settings
-from sickchill.helper import episode_num, pretty_file_size, SUBTITLE_EXTENSIONS
-from sickchill.helper.common import is_media_file, replace_extension, USER_AGENT
+from sickchill.helper import SUBTITLE_EXTENSIONS, episode_num, pretty_file_size
+from sickchill.helper.common import USER_AGENT, is_media_file, replace_extension
+from sickchill.oldbeard import db
 from sickchill.show.Show import Show
-
-from . import db
 
 # Add some missing languages
 LOCALE_NAMES.update(
@@ -692,7 +691,7 @@ def create_https_certificates(ssl_cert, ssl_key):
     try:
         from OpenSSL import crypto
 
-        from sickchill.certgen import createCertificate, createCertRequest, createKeyPair, TYPE_RSA
+        from sickchill.certgen import TYPE_RSA, createCertificate, createCertRequest, createKeyPair
     except ModuleNotFoundError:
         logger.info(traceback.format_exc())
         logger.warning(_("pyopenssl module missing, please install for https access"))
@@ -792,7 +791,7 @@ def check_url(url):
     We only check the URL header.
     """
     try:
-        requests.head(url, verify=False).raise_for_status()
+        requests.head(url, timeout=10).raise_for_status()
     except Exception as error:
         # noinspection PyTypeChecker
         handle_requests_exception(error)
@@ -1273,7 +1272,6 @@ def handle_requests_exception(
         Exception,
         TypeError,
         ValueError,
-        "requests.exceptions.BaseHTTPError",
         "requests.exceptions.ChunkedEncodingError",
         "requests.exceptions.ConnectTimeout",
         "requests.exceptions.ConnectionError",
@@ -1327,17 +1325,15 @@ def handle_requests_exception(
         "urllib3.exceptions.RequestError",
         "urllib3.exceptions.ResponseError",
         "urllib3.exceptions.ResponseNotChunked",
-        "urllib3.exceptions.SNIMissingWarning",
         "urllib3.exceptions.SSLError",
         "urllib3.exceptions.SecurityWarning",
-        "urllib3.exceptions.SubjectAltNameWarning",
         "urllib3.exceptions.SystemTimeWarning",
         "urllib3.exceptions.TimeoutError",
         "urllib3.exceptions.TimeoutStateError",
         "urllib3.exceptions.URLSchemeUnknown",
         "urllib3.exceptions.UnrewindableBodyError",
         # "urllib3.exceptions.httplib_IncompleteRead",
-    ]
+    ],
 ):
     def get_level(exception):
         return (logger.ERROR, logger.WARNING)[exception and "s,t,o,p,b,r,e,a,k,i,n,g,f" in str(exception)]
@@ -1650,7 +1646,7 @@ def imdb_from_tvdbid_on_tvmaze(indexer_id: Union[str, int]) -> str:
         try:
             imdb_id = data["externals"]["imdb"]
         except (SyntaxError, IndexError, ValueError):
-            logger.debug(f"attempt to use tvmaze to get imdbid failed")
+            logger.debug("attempt to use tvmaze to get imdbid failed")
 
     return imdb_id
 
@@ -1725,7 +1721,7 @@ def manage_torrents_url(reset=False):
 
     def test_exists(url):
         try:
-            h = requests.head(url)
+            h = requests.head(url, timeout=10)
             return h.status_code != 404
         except requests.exceptions.RequestException:
             return False

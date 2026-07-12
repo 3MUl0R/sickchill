@@ -7,11 +7,11 @@ import zipfile
 from babelfish import Language
 from guessit import guessit
 from requests import Session
-from subliminal.cache import region, SHOW_EXPIRATION_TIME
+from subliminal.cache import SHOW_EXPIRATION_TIME, region
 from subliminal.exceptions import ProviderError
 from subliminal.matches import guess_matches
 from subliminal.providers import Provider
-from subliminal.subtitle import fix_line_ending, Subtitle
+from subliminal.subtitle import Subtitle, fix_line_ending
 from subliminal.utils import sanitize
 from subliminal.video import Episode, Movie
 
@@ -76,7 +76,7 @@ class WizdomSubtitle(Subtitle):
 class WizdomProvider(Provider):
     """Wizdom Provider."""
 
-    languages = {Language.fromalpha2(l) for l in ["he"]}
+    languages = {Language.fromalpha2(lang) for lang in ["he"]}
     server_url = "wizdom.xyz"
 
     def __init__(self):

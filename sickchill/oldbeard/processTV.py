@@ -2,21 +2,124 @@ import logging
 import os
 import shutil
 import stat
+import threading
+import time
 import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import validators
 from rarfile import BadRarFile, Error, NeedFirstVolume, PasswordRequired, RarCRCError, RarExecError, RarFile, RarOpenError, RarWrongPassword
 
 from sickchill import logger, settings
-from sickchill.helper.common import is_media_file, is_rar_file, is_sync_file, is_torrent_or_nzb_file, remove_extension
+from sickchill.helper.common import is_anime_extra, is_media_file, is_rar_file, is_sync_file, is_torrent_or_nzb_file, remove_extension, valid_url
 from sickchill.helper.exceptions import EpisodePostProcessingFailedException, FailedPostProcessingFailedException
-
-from . import common, db, failedProcessor, helpers, postProcessor
+from sickchill.oldbeard import common, db, failedProcessor, helpers, postProcessor
 
 if TYPE_CHECKING:
     from sickchill.oldbeard.name_parser.parser import ParseResult
+
+
+# Auto post-processing rescans the download folder on a short timer (every 2 minutes by default). A
+# file that fails for a PERMANENT reason -- unparseable name, ambiguous release, no matching episode
+# -- fails identically on every pass, re-running the parse, media probe, AI analysis and hashing each
+# time. That is the "post-processing the same thing over and over" loop. Remember failures and back
+# off exponentially. The fingerprint is (size, mtime) so a repaired or replaced file retries at once,
+# and a restart clears the table, so a backoff can never permanently strand a file.
+# Guarded by _failure_backoff_lock: the scheduled auto-processing task and a user-triggered
+# force_next run can touch this concurrently, and the read/evict/update sequences are not atomic.
+_failure_backoff = {}
+_failure_backoff_lock = threading.Lock()
+FAILURE_BACKOFF_BASE_SECONDS = 15 * 60
+FAILURE_BACKOFF_MAX_SECONDS = 24 * 60 * 60
+_FAILURE_BACKOFF_MAX_ENTRIES = 1000
+
+
+def reap_blocker(process_method, mode, delete_on, video_files, failed_files, extra_files):
+    """
+    Say why a just-processed folder must NOT be deleted, or return None when reaping is safe.
+
+    Reaping is an ``rmtree``, so every "keep it" reason here is a data-loss guard. Kept as a pure
+    function of the folder's classification so all four folder states (episodes only / extras only /
+    mixed / neither) can be asserted directly.
+
+    :return: a human-readable reason to keep the folder, or ``None`` to allow deletion
+    """
+    if process_method != "move":
+        # copy/hardlink/symlink deliberately leave the source in place.
+        return "process method is not 'move'"
+    if mode == "manual" and not delete_on:
+        return "manual mode without delete requested"
+    if not video_files:
+        # Nothing was imported from here this pass -- including a folder holding only bonus content.
+        return "no episodes were processed here"
+    if failed_files:
+        return f"{len(failed_files)} unprocessed video file(s) remain: {failed_files}"
+    if extra_files:
+        # Bonus content we declined to import is still the user's file, and a mis-classified episode
+        # would be deleted along with it.
+        return f"keeping {len(extra_files)} bonus file(s) we did not import: {extra_files}"
+    return None
+
+
+def _file_fingerprint(file_path):
+    """Return a cheap (size, mtime) identity for a file, or None if it cannot be read."""
+    try:
+        stat_result = os.stat(file_path)
+    except OSError:
+        return None
+    return stat_result.st_size, int(stat_result.st_mtime)
+
+
+def _backoff_seconds(failures):
+    """Exponential backoff: 15m, 30m, 1h, 2h ... capped at a day."""
+    return min(FAILURE_BACKOFF_BASE_SECONDS * (2 ** (failures - 1)), FAILURE_BACKOFF_MAX_SECONDS)
+
+
+def in_failure_backoff(file_path, force=False):
+    """
+    Check whether a previously-failed file should be skipped this pass.
+
+    A file whose content changed since it failed is retried immediately, as is one the user forced.
+    """
+    if force:
+        return False
+
+    with _failure_backoff_lock:
+        entry = _failure_backoff.get(file_path)
+        if not entry:
+            return False
+
+        fingerprint, failures, last_attempt = entry
+        if _file_fingerprint(file_path) != fingerprint:
+            _failure_backoff.pop(file_path, None)
+            return False
+
+        return (time.time() - last_attempt) < _backoff_seconds(failures)
+
+
+def record_processing_failure(file_path):
+    """Remember that this file failed, lengthening its backoff each consecutive time."""
+    fingerprint = _file_fingerprint(file_path)
+    if not fingerprint:
+        return
+
+    with _failure_backoff_lock:
+        entry = _failure_backoff.get(file_path)
+        failures = entry[1] + 1 if entry and entry[0] == fingerprint else 1
+
+        if len(_failure_backoff) >= _FAILURE_BACKOFF_MAX_ENTRIES:
+            for stale_path in [path for path in _failure_backoff if not os.path.exists(path)]:
+                _failure_backoff.pop(stale_path, None)
+            if len(_failure_backoff) >= _FAILURE_BACKOFF_MAX_ENTRIES:
+                _failure_backoff.pop(next(iter(_failure_backoff)), None)
+
+        _failure_backoff[file_path] = (fingerprint, failures, time.time())
+
+
+def record_processing_success(file_path):
+    """Clear any remembered failure for a file that has now been processed."""
+    with _failure_backoff_lock:
+        _failure_backoff.pop(file_path, None)
 
 
 class ProcessResult(object):
@@ -112,6 +215,78 @@ def log_helper(message, level=logging.INFO):
     return message + "\n"
 
 
+# Container signatures for restore_media_extensions. Only formats whose magic is unambiguous at a
+# fixed offset -- a wrong guess here would hand the post-processor a file it cannot actually play.
+# ftyp alone is NOT enough: ISO-BMFF also carries M4A audio and HEIF/AVIF images, so the major
+# brand must name a video container.
+_MP4_VIDEO_BRANDS = {b"isom", b"iso2", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42", b"avc1", b"dash", b"M4V ", b"M4VP", b"NDSC", b"NDSM"}
+
+
+def _sniff_media_extension(header: bytes):
+    if header[:4] == b"\x1aE\xdf\xa3":
+        return "mkv"
+    if header[4:8] == b"ftyp" and header[8:12] in _MP4_VIDEO_BRANDS:
+        return "mp4"
+    if header[:4] == b"RIFF" and header[8:12] == b"AVI ":
+        return "avi"
+    return None
+
+
+def restore_media_extensions(directory, filenames, result):
+    """
+    Rename extension-less video payloads in ``directory`` so the rest of the pipeline can see them.
+
+    Some NZBs deliver a single obfuscated payload file with no extension at all. The download client
+    reports the job Completed, but nothing in the folder passes is_media_file, so the release strands
+    in a snatched status forever and the folder is rescanned every auto-processing pass. Sniff the
+    container magic of extension-less files and give them their extension back, in place.
+
+    :return: ``filenames`` with any renamed entries replaced by their new names
+    """
+    if not directory:
+        return filenames
+
+    restored = []
+    for filename in filenames:
+        if os.path.splitext(filename)[1]:
+            restored.append(filename)
+            continue
+        path = os.path.join(directory, filename)
+        header = b""
+        if os.path.isfile(path):
+            try:
+                with open(path, "rb") as handle:
+                    header = handle.read(12)
+            except OSError:
+                pass
+        extension = _sniff_media_extension(header)
+        if not extension:
+            restored.append(filename)
+            continue
+        new_filename = f"{filename}.{extension}"
+        target = os.path.join(directory, new_filename)
+        try:
+            # Claim the target name atomically (os.rename replaces existing files on POSIX, so a
+            # bare exists-check would be check-then-act); the claim fails if the name is taken.
+            with open(target, "xb"):
+                pass
+            os.replace(path, target)
+        except FileExistsError:
+            restored.append(filename)
+            continue
+        except OSError as error:
+            result.output += log_helper(f"Could not restore the {extension} extension on {path}: {error}", logger.WARNING)
+            try:
+                os.remove(target)
+            except OSError:
+                pass
+            restored.append(filename)
+            continue
+        result.output += log_helper(f"Restored the {extension} extension on extension-less payload {path}")
+        restored.append(new_filename)
+    return restored
+
+
 def process_dir(process_path, release_name=None, process_method=None, force=False, is_priority=None, delete_on=False, failed=False, mode="auto"):
     """
     Scans through the files in process_path and processes whatever media files it finds
@@ -158,7 +333,7 @@ def process_dir(process_path, release_name=None, process_method=None, force=Fals
         directories_from_rars = set()
 
         # If we have a release name (probably from nzbToMedia), and it is a rar/video, only process that file
-        if release_name and validators.url(release_name) is True:
+        if release_name and valid_url(release_name) is True:
             result.output += log_helper(_("Processing {release_name}").format(release_name=release_name))
             generator_to_use = [("", [], [release_name])]
         elif release_name and (is_media_file(release_name) or is_rar_file(release_name)):
@@ -175,6 +350,7 @@ def process_dir(process_path, release_name=None, process_method=None, force=Fals
 
             if current_directory:
                 filenames = [f for f in filenames if not is_torrent_or_nzb_file(f)]
+                filenames = restore_media_extensions(current_directory, filenames, result)
                 rar_files = [x for x in filenames if is_rar_file(os.path.join(current_directory, x))]
                 if rar_files:
                     extracted_directories = unrar(current_directory, rar_files, force, result)
@@ -192,24 +368,55 @@ def process_dir(process_path, release_name=None, process_method=None, force=Fals
             if not validate_dir(current_directory, release_name, failed, result):
                 continue
 
-            video_files = list(filter(is_media_file, filenames))
+            media_files = list(filter(is_media_file, filenames))
+
+            # Creditless openings, commercials, promos and disc menus are not episodes. Left in the
+            # list they parse against the batch folder's name and get filed as a whole season.
+            extra_files = [filename for filename in media_files if is_anime_extra(filename)]
+            video_files = [filename for filename in media_files if filename not in extra_files]
+            # One line per folder, at DEBUG: auto-processing re-walks this folder every couple of
+            # minutes for as long as the extras stay there, and per-file INFO would just replace the
+            # old post-processing loop with a logging loop.
+            failed_files = []
             if video_files:
-                process_media(current_directory, video_files, release_name, process_method, force, is_priority, result)
+                if extra_files:
+                    result.output += log_helper(f"{current_directory}: skipping {len(extra_files)} bonus file(s), not episodes: {extra_files}", logger.DEBUG)
+                failed_files = process_media(current_directory, video_files, release_name, process_method, force, is_priority, result)
+            elif extra_files:
+                # Nothing here but bonus content. Nothing was imported and nothing failed, so do not
+                # report a failure, and do not reap: reaping would delete the extras the user kept.
+                result.output += log_helper(f"{current_directory}: only bonus content ({len(extra_files)} file(s)), nothing to process", logger.DEBUG)
+                continue
             else:
                 result.result = False
 
-            # Delete all file not needed and avoid deleting files if Manual PostProcessing
-            if not (process_method == "move" and result.result) or (mode == "manual" and not delete_on):
+            # Season-aware reaping: never delete a folder while it still holds a video we did not
+            # capture -- a failed parse/match, an AI-match cooldown, or bonus content we declined to
+            # import. Files that were moved, matched an existing destination, or were already
+            # processed are "handled". See reap_blocker for the full decision.
+            blocker = reap_blocker(process_method, mode, delete_on, video_files, failed_files, extra_files)
+            if blocker:
+                result.output += log_helper(f"Not reaping {current_directory}: {blocker}", logger.DEBUG)
                 continue
 
-            # noinspection PyTypeChecker
-            unwanted_files = [x for x in filenames if x in video_files + rar_files]
-            if unwanted_files:
-                result.output += log_helper(_("Found unwanted files: {unwanted_files}").format(unwanted_files=unwanted_files), logger.DEBUG)
+            # The Synology metadata subfolder never holds wanted media: remove it and drop it
+            # from the walk list so os.walk does not try to descend into a now-deleted dir.
+            if "@eaDir" in directory_names:
+                delete_folder(os.path.join(current_directory, "@eaDir"), False)
+                directory_names[:] = [name for name in directory_names if name != "@eaDir"]
 
-            delete_folder(os.path.join(current_directory, "@eaDir"), False)
-            delete_files(current_directory, unwanted_files, result)
-            if delete_folder(current_directory, check_empty=not delete_on):
+            # Only reap a LEAF release folder. os.walk is top-down, so any remaining child dirs
+            # have NOT been processed yet; rmtree-ing the parent now could delete uncaptured
+            # nested media. Leave such folders for their own pass (the parent is retained).
+            if directory_names:
+                result.output += log_helper(
+                    f"Not reaping {current_directory}: unprocessed subdirectories remain: {directory_names}", logger.DEBUG
+                )
+                continue
+
+            # Leaf folder, all videos handled -> remove it and any leftover junk (samples, nfo,
+            # stray associated files, consumed duplicate sources, etc.).
+            if delete_folder(current_directory, check_empty=False):
                 result.output += log_helper(_("Deleted folder: {current_directory}").format(current_directory=current_directory), logger.DEBUG)
 
         # For processing extracted rars, only allow methods 'move' and 'copy'.
@@ -303,6 +510,7 @@ def validate_dir(process_path, release_name, failed, result):
             result.output += log_helper("Cannot process an episode that's already been moved to its show dir, skipping " + process_path, logger.WARNING)
             return False
 
+    media_seen = False
     for current_directory, directory_names, filenames in os.walk(process_path, topdown=False, followlinks=settings.PROCESSOR_FOLLOW_SYMLINKS):
         sync_files = list(filter(is_sync_file, filenames))
         if sync_files and settings.POSTPONE_IF_SYNC_FILES:
@@ -315,6 +523,9 @@ def validate_dir(process_path, release_name, failed, result):
         if settings.UNPACK == settings.UNPACK_PROCESS_CONTENTS:
             found_files += list(filter(is_rar_file, filenames))
 
+        if found_files:
+            media_seen = True
+
         for found_file in found_files:
             if current_directory != settings.TV_DOWNLOAD_DIR and found_files:
                 # pass 'current directory/filename' as one string to NameParser
@@ -322,6 +533,16 @@ def validate_dir(process_path, release_name, failed, result):
 
             if postProcessor.guessit_findit(found_file):
                 return True
+
+    # Rule-based parsing identified nothing. If AI post-process matching is enabled, still
+    # allow the folder through so the AI fallback in PostProcessor can attempt to identify
+    # the file(s) (e.g. anime releases whose names don't parse to the SC show, like
+    # "[Moozzi2] Working S3-09 ..." -> Wagnaria!!). The matcher is throttled per-file
+    # (cooldown + budget + response cache), so this does not spam the AI provider on
+    # repeated scheduler passes.
+    if media_seen and settings.AI_ENABLED and settings.AI_POSTPROCESS_MATCH_ENABLED:
+        result.output += log_helper(f"{process_path} : no rule-based match; deferring to AI post-process matcher", logger.DEBUG)
+        return True
 
     result.output += log_helper(f"{process_path} : No processable items found in folder", logger.DEBUG)
     return False
@@ -429,47 +650,94 @@ def unrar(path, rar_files, force, result):
     return unpacked_dirs
 
 
+def _episode_scope(parse_result):
+    """Restrict ``tv_episodes`` to the episode(s) a file maps to.
+
+    Returns ``(clause, params, count_column, expected)`` using ``tv_episodes.``-qualified columns (safe
+    when ``history`` is also joined), or ``None`` when we cannot tie the file to a show plus a concrete
+    episode/absolute number. ``expected`` is the number of distinct episodes/absolute numbers the file
+    maps to: **all** of them must be satisfied for ``already_processed`` to short-circuit, so a multi-
+    episode file is never skipped just because one of its episodes is already present. Callers MUST treat
+    ``None`` as "scope unknown" and never fall back to a global match.
+    """
+    show = getattr(parse_result, "show", None) if parse_result else None
+    if not show or not show.indexerid:
+        return None
+
+    # An ambiguous name ("Ajin 2 - 12" could be absolute episode 2 or season 2 episode 12) has no
+    # trustworthy scope. Scoping it anyway lets already_processed() report the file as handled, which
+    # would drop it from failed_files and let the folder -- and the file -- be reaped.
+    if getattr(parse_result, "ambiguous", False):
+        return None
+
+    if parse_result.season_number is not None and parse_result.episode_numbers:
+        episodes = sorted(set(parse_result.episode_numbers))
+        placeholders = ", ".join(["?"] * len(episodes))
+        clause = f"tv_episodes.showid = ? AND tv_episodes.season = ? AND tv_episodes.episode IN ({placeholders})"
+        return clause, [show.indexerid, parse_result.season_number, *episodes], "tv_episodes.episode", len(episodes)
+
+    if parse_result.ab_episode_numbers:
+        absolutes = sorted(set(parse_result.ab_episode_numbers))
+        placeholders = ", ".join(["?"] * len(absolutes))
+        clause = f"tv_episodes.showid = ? AND tv_episodes.absolute_number IN ({placeholders})"
+        return clause, [show.indexerid, *absolutes], "tv_episodes.absolute_number", len(absolutes)
+
+    return None
+
+
 def already_processed(process_path, video_file, force, result):
     """
-    Check if we already post processed a file
+    Check if we already post processed a file.
+
+    Only treats a file as already-processed when **every** episode it maps to is already
+    Downloaded/Archived under this release name (durable ``tv_episodes.release_name`` guard) or recorded
+    in the download ``history``. A release name that happens to sit on some *other* (or not-yet-downloaded)
+    episode must never short-circuit processing: doing so previously let a stray/duplicated release name
+    cause a real download to be skipped and its folder reaped, leaving the target episode stuck Snatched.
 
     param process_path: Directory a file resides in
     param video_file: File name
-    param force: Force checking when already checking (currently unused)
-    param result: True if file is already postprocessed, False if not
-    :return:
+    param force: Force re-processing (skip these checks)
+    param result: ProcessResult to log into
+    :return: True if the file is already post processed, False otherwise
     """
     if force:
         return False
 
-    # Avoid processing the same dir again if we use a process method <> move
+    # Parse the file itself (not just the folder) so the scope reflects this exact episode; folder-only
+    # parses are under-scoped for season packs and generic parent directories.
+    parse_result: "ParseResult" = postProcessor.guessit_findit(os.path.join(process_path, video_file))
+    scope = _episode_scope(parse_result)
+    if scope is None:
+        # Can't tie this file to a concrete episode -> never skip on a global release-name match.
+        return False
+    scope_clause, scope_params, count_column, expected = scope
+
+    downloaded_or_archived = common.Quality.DOWNLOADED + common.Quality.ARCHIVED
+    status_placeholders = ", ".join(["?"] * len(downloaded_or_archived))
     main_db_con = db.DBConnection()
-    sql_result = main_db_con.select("SELECT release_name FROM tv_episodes WHERE release_name IN (?, ?) LIMIT 1", [process_path, remove_extension(video_file)])
-    if sql_result:
-        # result.output += log_helper("You're trying to post process a dir that's already been processed, skipping", logger.DEBUG)
+
+    # Durable guard (independent of the trimmable history table): all mapped episodes are already
+    # downloaded/archived and carry this exact release name (folder path or file basename).
+    release_sql = (
+        f"SELECT COUNT(DISTINCT {count_column}) FROM tv_episodes "
+        f"WHERE release_name IN (?, ?) AND release_name != '' AND {scope_clause} AND status IN ({status_placeholders})"
+    )
+    rows = main_db_con.select(release_sql, [process_path, remove_extension(video_file), *scope_params, *downloaded_or_archived])
+    if rows and rows[0][0] >= expected:
+        result.output += log_helper("You're trying to post process a dir that's already been processed, skipping", logger.DEBUG)
         return True
 
-    # Needed if we have downloaded the same episode @ different quality
-    # But we need to make sure we check the history of the episode we're going to PP, and not others
-    # if it fails to find any info (because we're doing an unparsable folder (like the TV root dir) it will throw an exception, which we want to ignore
-    parse_result: "ParseResult" = postProcessor.guessit_findit(process_path)
-
-    search_sql = "SELECT tv_episodes.indexerid, history.resource FROM tv_episodes INNER JOIN history ON history.showid=tv_episodes.showid"  # This part is always the same
-    search_sql += " WHERE history.season=tv_episodes.season AND history.episode=tv_episodes.episode"
-
-    # If we find a showid, a season number, and one or more episode numbers than we need to use those in the query
-    if parse_result:
-        if parse_result.show.indexerid:
-            search_sql += f" AND tv_episodes.showid={parse_result.show.indexerid}"
-        if parse_result.season_number is not None and parse_result.episode_numbers:
-            search_sql += f" AND tv_episodes.season={parse_result.season_number} AND tv_episodes.episode={parse_result.episode_numbers[0]}"
-        elif parse_result.ab_episode_numbers:
-            search_sql += f" AND tv_episodes.showid={parse_result.show.indexerid} AND tv_episodes.absolute_number={parse_result.ab_episode_numbers[0]}"
-
-    search_sql += " AND tv_episodes.status IN (" + ",".join([str(x) for x in common.Quality.DOWNLOADED + common.Quality.ARCHIVED]) + ")"
-    search_sql += " AND history.resource LIKE ? LIMIT 1"
-    sql_result = main_db_con.select(search_sql, ["%" + video_file])
-    if sql_result:
+    # History-backed guard (handles the same episode re-downloaded @ different quality): all mapped
+    # episodes are downloaded/archived and history records this resource for them.
+    history_sql = (
+        f"SELECT COUNT(DISTINCT {count_column}) FROM tv_episodes "
+        "INNER JOIN history ON history.showid = tv_episodes.showid "
+        "AND history.season = tv_episodes.season AND history.episode = tv_episodes.episode "
+        f"WHERE {scope_clause} AND tv_episodes.status IN ({status_placeholders}) AND history.resource LIKE ?"
+    )
+    rows = main_db_con.select(history_sql, [*scope_params, *downloaded_or_archived, "%" + video_file])
+    if rows and rows[0][0] >= expected:
         result.output += log_helper("You're trying to post process a video that's already been processed, skipping", logger.DEBUG)
         return True
 
@@ -490,11 +758,18 @@ def process_media(process_path, video_files, release_name, process_method, force
     """
 
     processor = None
+    failed_files = []
     for cur_video_file in video_files:
         cur_video_file_path = os.path.join(process_path, cur_video_file)
 
         if already_processed(process_path, cur_video_file, force, result):
             result.output += log_helper(f"Skipping already processed file: {cur_video_file}", logger.DEBUG)
+            continue
+
+        if in_failure_backoff(cur_video_file_path, force):
+            result.output += log_helper(f"Skipping {cur_video_file}: post-processing failed before, waiting before the next attempt", logger.DEBUG)
+            # Still an uncaptured video, so the folder must not be reaped while we wait.
+            failed_files.append(cur_video_file)
             continue
 
         try:
@@ -509,11 +784,16 @@ def process_media(process_path, video_files, release_name, process_method, force
             result.output += processor.log
 
         if result.result:
+            record_processing_success(cur_video_file_path)
             result.output += log_helper(f"Processing succeeded for {cur_video_file_path}")
         else:
+            record_processing_failure(cur_video_file_path)
             result.output += log_helper(f"Processing failed for {cur_video_file_path}: {process_fail_message}", logger.WARNING)
             result.missed_files.append(f"{cur_video_file_path} : Processing failed: {process_fail_message}")
             result.aggresult = False
+            failed_files.append(cur_video_file)
+
+    return failed_files
 
 
 def process_failed(process_path, release_name, result):
@@ -523,10 +803,12 @@ def process_failed(process_path, release_name, result):
         return
 
     processor = None
+    deferred = False
 
     try:
         processor = failedProcessor.FailedProcessor(process_path, release_name)
         result.result = processor.process()
+        deferred = processor.deferred
         process_fail_message = ""
     except FailedPostProcessingFailedException as error:
         result.result = False
@@ -535,11 +817,51 @@ def process_failed(process_path, release_name, result):
     if processor:
         result.output += processor.log
 
+    if process_fail_message and remove_empty_failed_marker_dir(process_path, release_name, result):
+        result.output += log_helper(f"Failed Download Processing succeeded: ({release_name}, {process_path})")
+        return
+
     if settings.DELETE_FAILED and result.result:
         if delete_folder(process_path, check_empty=False):
             result.output += log_helper(f"Deleted folder: {process_path}", logger.DEBUG)
 
     if result.result:
         result.output += log_helper(f"Failed Download Processing succeeded: ({release_name}, {process_path})")
+    elif deferred:
+        # Not a failure: the download status checker is tracking this download and will block and
+        # retry it itself. The folder stays until the checker has resolved the episode; the pass
+        # after that resolves it as stale litter and the DELETE_FAILED gate above cleans it up.
+        result.output += log_helper(f"Failed download {process_path} is tracked by the download status checker; leaving the folder to it")
     else:
         result.output += log_helper(f"Failed Download Processing failed: ({release_name}, {process_path}): {process_fail_message}", logger.WARNING)
+
+
+def remove_empty_failed_marker_dir(process_path, release_name, result):
+    """
+    Last resort for the litter SAB leaves behind: it pre-creates the job's destination folder in the
+    completed dir and renames it `_FAILED_<jobname>` when post-processing fails, so the folder is
+    usually empty and its name is often unparseable. Every pass over it would warn forever.
+
+    Only a recognized marker folder is touched, only when no explicit release name was given (an
+    external script's signal is never consumed here), only when the operator allows deletions at all,
+    never the download root itself, and only via the non-recursive os.rmdir -- a folder holding, or
+    concurrently gaining, ANY content survives untouched.
+    """
+    if release_name or not settings.DELETE_FAILED:
+        return False
+
+    upper_name = os.path.basename(process_path).upper()
+    if not (upper_name.startswith(("_FAILED_", "_UNDERSIZED_")) or upper_name.endswith(("_FAILED_", "_UNDERSIZED_"))):
+        return False
+
+    if settings.TV_DOWNLOAD_DIR and str(Path(process_path).resolve()) == str(Path(settings.TV_DOWNLOAD_DIR).resolve()):
+        return False
+
+    try:
+        os.rmdir(process_path)
+    except OSError:
+        return False
+
+    result.result = True
+    result.output += log_helper(f"Removed the empty failed-download folder: {process_path}")
+    return True
