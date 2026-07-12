@@ -362,11 +362,11 @@ class WebRoot(WebHandler):
 @Route("/ui(/?.*)", name="ui")
 class UI(WebRoot):
     def locale_json(self):
-        lang = self.get_query_argument("lang")
+        # lang comes from the request: a locale code is a single path component, so
+        # basename() is the identity for every legitimate value and strips any
+        # separator smuggling; the realpath prefix check below still rejects "."/"..".
+        lang = os.path.basename(self.get_query_argument("lang"))
         """ Get /locale/{lang_code}/LC_MESSAGES/messages.json """
-        # lang comes from the request: resolve the full path (symlinks followed) and
-        # refuse anything that escapes the locale directory. Both sides derive from
-        # the same locale_dir constant, so the prefix comparison cannot mis-reject.
         locale_base = os.path.realpath(str(locale_dir))
         locale_file = os.path.realpath(os.path.join(locale_base, lang, "LC_MESSAGES", "messages.json"))
         contained = locale_file.startswith(locale_base + os.sep)
