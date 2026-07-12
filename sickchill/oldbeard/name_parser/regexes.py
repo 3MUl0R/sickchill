@@ -90,8 +90,10 @@ normal_regexes = [
         # Show Name - 1x02-03-04 - My Ep Name
         r"""
      ^((?!\[.+?\])(?P<series_name>.+?)[\[. _-]+)?  # Show_Name and separator if no brackets group
-     (?P<season_num>\d+)x                          # 1x
-     (?P<ep_num>\d+)                               # 02 and separator
+     (?P<season_num>\d{1,2})x                     # 1x -- real seasons only, so a resolution
+                                                   # (1440x1080, 1920x1080, 640x480) cannot match
+     (?P<ep_num>\d+)(?!\d|[pi])                    # 02 and separator; the full digit run,
+                                                   # never a backtracked slice of ...x1080p
      (([. _-]*x|-)                                 # linking x/- char
      (?P<extra_ep_num>
      (?!(1080|720|480)[pi])(?!(?<=x)26[45])           # ignore obviously wrong multi-eps
@@ -379,8 +381,10 @@ anime_regexes = [
         # Show Name - 1x02-03-04 - My Ep Name
         r"""
      ^((?!\[.+?\])(?P<series_name>.+?)[\[. _-]+)?  # Show_Name and separator if no brackets group
-     (?P<season_num>\d+)x                          # 1x
-     (?P<ep_num>\d+)                               # 02 and separator
+     (?P<season_num>\d{1,2})x                     # 1x -- real seasons only, so a resolution
+                                                   # (1440x1080, 1920x1080, 640x480) cannot match
+     (?P<ep_num>\d+)(?!\d|[pi])                    # 02 and separator; the full digit run,
+                                                   # never a backtracked slice of ...x1080p
      (([. _-]*x|-)                                 # linking x/- char
      (?P<extra_ep_num>
      (?!(1080|720|480)[pi])(?!(?<=x)26[45])           # ignore obviously wrong multi-eps

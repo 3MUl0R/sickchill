@@ -971,6 +971,61 @@ class SeasonlessAnimeAbsoluteTests(conftest.ResetNameCacheMixin, conftest.SickCh
         self.assertIsNone(result.season_number)
 
 
+class ResolutionNotSeasonEpisodeTests(conftest.SickChillTestDBCase):
+    """A WxH resolution token (1440x1080p, 1920x1080) must never parse as season x episode.
+
+    Live failure 2026-07-11: 'Dirty Pair Flash 2 - 04 (BDRip 1440x1080p ...)' parsed as S1440E1080
+    via the 'anime SxEE' regex, so six valid files sat unprocessable in the download folder while
+    their episodes reverted to Wanted and re-downloaded.
+    """
+
+    def __init__(self, something):
+        super().__init__(something)
+        super().setUp()
+        self.show = tv.TVShow(1, 1, "en")
+
+    def tearDown(self):
+        parser.name_parser_cache.data.clear()
+
+    def _parse(self, name, series_name, anime):
+        self.show.name = series_name
+        self.show.anime = int(anime)
+        name_parser = parser.NameParser(True, show_object=self.show)
+        return name_parser.parse(name)
+
+    def test_anime_resolution_is_not_season_episode(self):
+        name = "Dirty Pair Flash 2 - 04 (BDRip 1440x1080p x265 HEVC FLAC, AC-3 2.0x2)(Dual Audio)[sxales]"
+        try:
+            result = self._parse(name, "Dirty Pair Flash", anime=True)
+        except (parser.InvalidNameException, parser.InvalidShowException):
+            return  # refusing to parse is acceptable; inventing S1440E1080 is not
+        self.assertNotEqual(result.season_number, 1440)
+        self.assertNotIn(1080, result.episode_numbers or [])
+
+    def test_bare_resolution_is_not_season_episode(self):
+        try:
+            result = self._parse("Some Show 1920x1080 WEBRip xViD-GRP", "Some Show", anime=False)
+        except (parser.InvalidNameException, parser.InvalidShowException):
+            return
+        self.assertNotEqual(result.season_number, 1920)
+        self.assertNotIn(1080, result.episode_numbers or [])
+
+    def test_fov_still_parses(self):
+        result = self._parse("Some Fov Show 3x07 Source-GRP", "Some Fov Show", anime=False)
+        self.assertEqual(result.season_number, 3)
+        self.assertEqual(result.episode_numbers, [7])
+
+    def test_backtracking_cannot_slice_a_resolution(self):
+        # (?![pi]) alone is defeated by backtracking: 64x480p would parse as S64E48 with '0p'
+        # left over, and 1x02p as S01E00. The guard must reject the whole run, not a slice.
+        for name, series in (("Some Show 64x480p WEBRip", "Some Show"), ("Some Show 1x02p Oddity", "Some Show")):
+            try:
+                result = self._parse(name, series, anime=False)
+            except (parser.InvalidNameException, parser.InvalidShowException):
+                continue
+            self.assertNotIn((result.season_number, tuple(result.episode_numbers or ())), [(64, (48,)), (1, (0,))], name)
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         SUITE = unittest.TestLoader().loadTestsFromName("name_parser_tests.BasicTests.test_" + sys.argv[1])
