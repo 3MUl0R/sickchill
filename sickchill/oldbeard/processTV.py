@@ -215,6 +215,78 @@ def log_helper(message, level=logging.INFO):
     return message + "\n"
 
 
+# Container signatures for restore_media_extensions. Only formats whose magic is unambiguous at a
+# fixed offset -- a wrong guess here would hand the post-processor a file it cannot actually play.
+# ftyp alone is NOT enough: ISO-BMFF also carries M4A audio and HEIF/AVIF images, so the major
+# brand must name a video container.
+_MP4_VIDEO_BRANDS = {b"isom", b"iso2", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42", b"avc1", b"dash", b"M4V ", b"M4VP", b"NDSC", b"NDSM"}
+
+
+def _sniff_media_extension(header: bytes):
+    if header[:4] == b"\x1aE\xdf\xa3":
+        return "mkv"
+    if header[4:8] == b"ftyp" and header[8:12] in _MP4_VIDEO_BRANDS:
+        return "mp4"
+    if header[:4] == b"RIFF" and header[8:12] == b"AVI ":
+        return "avi"
+    return None
+
+
+def restore_media_extensions(directory, filenames, result):
+    """
+    Rename extension-less video payloads in ``directory`` so the rest of the pipeline can see them.
+
+    Some NZBs deliver a single obfuscated payload file with no extension at all. The download client
+    reports the job Completed, but nothing in the folder passes is_media_file, so the release strands
+    in a snatched status forever and the folder is rescanned every auto-processing pass. Sniff the
+    container magic of extension-less files and give them their extension back, in place.
+
+    :return: ``filenames`` with any renamed entries replaced by their new names
+    """
+    if not directory:
+        return filenames
+
+    restored = []
+    for filename in filenames:
+        if os.path.splitext(filename)[1]:
+            restored.append(filename)
+            continue
+        path = os.path.join(directory, filename)
+        header = b""
+        if os.path.isfile(path):
+            try:
+                with open(path, "rb") as handle:
+                    header = handle.read(12)
+            except OSError:
+                pass
+        extension = _sniff_media_extension(header)
+        if not extension:
+            restored.append(filename)
+            continue
+        new_filename = f"{filename}.{extension}"
+        target = os.path.join(directory, new_filename)
+        try:
+            # Claim the target name atomically (os.rename replaces existing files on POSIX, so a
+            # bare exists-check would be check-then-act); the claim fails if the name is taken.
+            with open(target, "xb"):
+                pass
+            os.replace(path, target)
+        except FileExistsError:
+            restored.append(filename)
+            continue
+        except OSError as error:
+            result.output += log_helper(f"Could not restore the {extension} extension on {path}: {error}", logger.WARNING)
+            try:
+                os.remove(target)
+            except OSError:
+                pass
+            restored.append(filename)
+            continue
+        result.output += log_helper(f"Restored the {extension} extension on extension-less payload {path}")
+        restored.append(new_filename)
+    return restored
+
+
 def process_dir(process_path, release_name=None, process_method=None, force=False, is_priority=None, delete_on=False, failed=False, mode="auto"):
     """
     Scans through the files in process_path and processes whatever media files it finds
@@ -278,6 +350,7 @@ def process_dir(process_path, release_name=None, process_method=None, force=Fals
 
             if current_directory:
                 filenames = [f for f in filenames if not is_torrent_or_nzb_file(f)]
+                filenames = restore_media_extensions(current_directory, filenames, result)
                 rar_files = [x for x in filenames if is_rar_file(os.path.join(current_directory, x))]
                 if rar_files:
                     extracted_directories = unrar(current_directory, rar_files, force, result)
