@@ -23,6 +23,11 @@ class NewznabProvider(NZBProvider, tvcache.RSSTorrentMixin):
     # large; this caps provider request volume. Capped drops are logged (never silent).
     ANIME_MAX_FREETEXT_VARIANTS = 8
 
+    # When an AnimeSearchPlan samples an episode OUT of the free-text sweep but the provider
+    # cannot issue structured queries either (torznab, no tvdbid caps), the episode must never
+    # be left with zero queries: keep this many free-text variants as a floor.
+    ANIME_FREETEXT_FLOOR = 2
+
     def __init__(self, name, url, key="0", categories="5030,5040", search_mode="episode", search_fallback=False, enable_daily=True, enable_backlog=False):
         super().__init__(name)
 
@@ -414,14 +419,33 @@ class NewznabProvider(NZBProvider, tvcache.RSSTorrentMixin):
                     variants.append(("structured-absolute", abs_params))
 
         # Free-text variants from get_episode/season_search_strings (deduped, capped).
+        # An AnimeSearchPlan (set for the duration of one find_search_results invocation) may
+        # sample this episode out of the full alias sweep on large segments; structured queries
+        # above still run for every episode, and providers that could not build any structured
+        # variant keep a small free-text floor so no episode is ever searched with zero queries.
+        plan = getattr(self, "anime_search_plan", None)
+        freetext_full = mode == "Season" or plan is None or plan.freetext_eligible(episode)
         free_text = sorted({s for s in search_strings if s})
-        capped = free_text[: self.ANIME_MAX_FREETEXT_VARIANTS]
-        if len(free_text) > len(capped):
+
+        if freetext_full:
+            capped = free_text[: self.ANIME_MAX_FREETEXT_VARIANTS]
+            if len(free_text) > len(capped):
+                logger.debug(
+                    "[{0}] Capping anime free-text {1} queries from {2} to {3} (ANIME_MAX_FREETEXT_VARIANTS)".format(
+                        self.name, mode, len(free_text), len(capped)
+                    )
+                )
+        elif variants:
+            capped = []
+            logger.debug("[{0}] Episode not in the free-text sample for this large anime search; structured queries cover it".format(self.name))
+        else:
+            capped = free_text[: self.ANIME_FREETEXT_FLOOR]
             logger.debug(
-                "[{0}] Capping anime free-text {1} queries from {2} to {3} (ANIME_MAX_FREETEXT_VARIANTS)".format(
-                    self.name, mode, len(free_text), len(capped)
+                "[{0}] Episode not in the free-text sample but no structured query is possible here; keeping {1} floor free-text queries".format(
+                    self.name, len(capped)
                 )
             )
+
         for search_string in capped:
             ft_params = self._anime_base_params()
             ft_params["q"] = search_string

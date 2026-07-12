@@ -27,6 +27,47 @@ if TYPE_CHECKING:
     from sickchill.tv import TVEpisode
 
 
+class AnimeSearchPlan(object):
+    """
+    Which episodes of one anime search invocation get the full free-text alias sweep.
+
+    Anime episode searches are additive: structured (tvdbid) queries plus free-text alias
+    variants per episode. On a large season the free-text side amplifies brutally -- a 74-episode
+    backlog segment was measured at 585 provider requests over 2.5 hours with zero snatches --
+    and the alias sweeps for neighboring episodes return heavily overlapping result pages. This
+    plan keeps the full sweep for a sample of episodes spread across the segment (first two,
+    last two, and evenly spaced interior picks) and lets every other episode rely on its
+    structured queries, which are precise and cheap. Small segments are never sampled, so the
+    common few-episode case behaves exactly as before.
+
+    The plan lives only for one find_search_results invocation (created and cleared there), so
+    no state leaks between backlog runs, fallback modes, or manual searches. A user's manual
+    search is deliberate and single-episode: never sampled. Failed-download retries stay
+    sampled, mirroring how they stay throttled elsewhere.
+    """
+
+    SAMPLED_EPISODES = 8
+
+    def __init__(self, episodes, manual_search=False, is_failed_retry=False):
+        self.unlimited = bool(manual_search) and not is_failed_retry
+        # The backlog builds segments from a query with no ORDER BY; sort so "first two, last
+        # two, spaced interior" is chronological rather than whatever order the rows arrived in.
+        keys = sorted((episode.season, episode.episode) for episode in episodes)
+        self.sampled = not self.unlimited and len(keys) > self.SAMPLED_EPISODES
+        if not self.sampled:
+            self.eligible = set(keys)
+            return
+        last = len(keys) - 1
+        picks = {0, 1, last - 1, last}
+        interior = self.SAMPLED_EPISODES - len(picks)
+        for step in range(1, interior + 1):
+            picks.add(round(step * last / (interior + 1)))
+        self.eligible = {keys[index] for index in picks}
+
+    def freetext_eligible(self, episode):
+        return self.unlimited or (episode.season, episode.episode) in self.eligible
+
+
 class GenericProvider(object):
     NZB = "nzb"
     NZBDATA = "nzbdata"
@@ -62,6 +103,7 @@ class GenericProvider(object):
         self.cache = TVCache(self)
 
         self.current_episode_object = None
+        self.anime_search_plan = None
 
         self.enable_backlog = False
         self.enable_daily = False
@@ -162,31 +204,42 @@ class GenericProvider(object):
         collect_unmatched_anime = bool(show.is_anime) and settings.AI_ENABLED and settings.AI_SEARCH_ENABLED
         unmatched_anime_items = []
 
-        for episode in episodes:
-            cache_result = self.cache.search_cache(episode, manual_search=manual_search, down_cur_quality=download_current_quality)
-            if cache_result:
-                if episode.episode not in results:
-                    results[episode.episode] = cache_result
-                else:
-                    results[episode.episode].extend(cache_result)
+        if bool(show.is_anime) and not (show.air_by_date or show.sports) and search_mode == "episode":
+            self.anime_search_plan = AnimeSearchPlan(episodes, manual_search=manual_search, is_failed_retry=is_failed_retry)
+            if self.anime_search_plan.sampled:
+                logger.info(
+                    f"{self.name} : {len(episodes)} wanted episodes in this anime search: issuing the full free-text alias sweep for "
+                    f"{AnimeSearchPlan.SAMPLED_EPISODES} sampled episodes and structured queries for every episode"
+                )
 
-                continue
+        try:
+            for episode in episodes:
+                cache_result = self.cache.search_cache(episode, manual_search=manual_search, down_cur_quality=download_current_quality)
+                if cache_result:
+                    if episode.episode not in results:
+                        results[episode.episode] = cache_result
+                    else:
+                        results[episode.episode].extend(cache_result)
 
-            if len(episodes) > 1 and search_mode == "season" and searched_scene_season == episode.scene_season:
-                continue
+                    continue
 
-            search_strings = []
-            searched_scene_season = episode.scene_season
+                if len(episodes) > 1 and search_mode == "season" and searched_scene_season == episode.scene_season:
+                    continue
 
-            if len(episodes) > 1 and search_mode == "season":
-                search_strings = self.get_season_search_strings(episode)
-            elif search_mode == "episode":
-                search_strings = self.get_episode_search_strings(episode)
+                search_strings = []
+                searched_scene_season = episode.scene_season
 
-            self.current_episode_object = episode
+                if len(episodes) > 1 and search_mode == "season":
+                    search_strings = self.get_season_search_strings(episode)
+                elif search_mode == "episode":
+                    search_strings = self.get_episode_search_strings(episode)
 
-            for search_string in search_strings:
-                items_list += self.search(search_string)
+                self.current_episode_object = episode
+
+                for search_string in search_strings:
+                    items_list += self.search(search_string)
+        finally:
+            self.anime_search_plan = None
 
         if len(results) == len(episodes):
             return results

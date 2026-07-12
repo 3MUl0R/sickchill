@@ -376,5 +376,132 @@ class A1CacheIntegrationTests(conftest.ResetNameCacheMixin, conftest.SickChillTe
         self.assertTrue(needed.get(episode))
 
 
+class AnimeSearchPlanTest(unittest.TestCase):
+    """AnimeSearchPlan: free-text sampling for large anime segments.
+
+    A 74-episode backlog segment was measured at 585 provider GETs over 2.5 hours with zero
+    snatches; the plan keeps the full alias sweep for a spread sample of episodes and lets the
+    rest ride on their structured queries.
+    """
+
+    @staticmethod
+    def _episodes(count, season=1):
+        return [types.SimpleNamespace(season=season, episode=number) for number in range(1, count + 1)]
+
+    def test_small_segment_is_never_sampled(self):
+        from sickchill.providers.GenericProvider import AnimeSearchPlan
+
+        episodes = self._episodes(AnimeSearchPlan.SAMPLED_EPISODES)
+        plan = AnimeSearchPlan(episodes)
+        self.assertFalse(plan.sampled)
+        for episode in episodes:
+            self.assertTrue(plan.freetext_eligible(episode))
+
+    def test_large_segment_samples_first_last_and_interior(self):
+        from sickchill.providers.GenericProvider import AnimeSearchPlan
+
+        episodes = self._episodes(74)
+        plan = AnimeSearchPlan(episodes)
+        self.assertTrue(plan.sampled)
+        eligible = [episode for episode in episodes if plan.freetext_eligible(episode)]
+        self.assertLessEqual(len(eligible), AnimeSearchPlan.SAMPLED_EPISODES)
+        # first two and last two are always in the sample
+        for episode in (episodes[0], episodes[1], episodes[-2], episodes[-1]):
+            self.assertTrue(plan.freetext_eligible(episode))
+        # at least one interior episode is sampled, and most interior episodes are not
+        interior = [episode for episode in eligible if 2 <= episodes.index(episode) <= 71]
+        self.assertTrue(interior)
+        self.assertFalse(plan.freetext_eligible(episodes[2]))
+
+    def test_manual_search_is_unlimited(self):
+        from sickchill.providers.GenericProvider import AnimeSearchPlan
+
+        episodes = self._episodes(74)
+        plan = AnimeSearchPlan(episodes, manual_search=True)
+        self.assertFalse(plan.sampled)
+        self.assertTrue(all(plan.freetext_eligible(episode) for episode in episodes))
+
+    def test_failed_retry_stays_sampled(self):
+        from sickchill.providers.GenericProvider import AnimeSearchPlan
+
+        episodes = self._episodes(74)
+        plan = AnimeSearchPlan(episodes, manual_search=True, is_failed_retry=True)
+        self.assertTrue(plan.sampled)
+
+    def test_shuffled_input_still_samples_chronologically(self):
+        # the backlog builds segments from a query with no ORDER BY
+        import random
+
+        from sickchill.providers.GenericProvider import AnimeSearchPlan
+
+        episodes = self._episodes(74)
+        shuffled = episodes[:]
+        random.Random(42).shuffle(shuffled)
+        plan = AnimeSearchPlan(shuffled)
+        for episode in (episodes[0], episodes[1], episodes[-2], episodes[-1]):
+            self.assertTrue(plan.freetext_eligible(episode))
+        self.assertFalse(plan.freetext_eligible(episodes[2]))
+
+
+class AnimeVariantsWithPlanTest(conftest.SickChillTestDBCase):
+    """_build_anime_variants honors the invocation-scoped AnimeSearchPlan."""
+
+    STRINGS = {"Bleach S11E01", "Bleach 206", "Bleach 06"}
+
+    def _provider(self, use_tvdbid=True, torznab=False):
+        provider = _make_provider(use_tvdbid=use_tvdbid, torznab=torznab)
+        provider.show = types.SimpleNamespace(indexerid=74796, is_anime=True, air_by_date=False, sports=False)
+        provider.current_episode_object = types.SimpleNamespace(season=11, episode=1, scene_season=11, scene_episode=1, absolute_number=206)
+        return provider
+
+    @staticmethod
+    def _plan_with(eligible):
+        from sickchill.providers.GenericProvider import AnimeSearchPlan
+
+        plan = AnimeSearchPlan.__new__(AnimeSearchPlan)
+        plan.unlimited = False
+        plan.sampled = True
+        plan.eligible = eligible
+        return plan
+
+    def test_ineligible_episode_keeps_structured_drops_freetext(self):
+        provider = self._provider()
+        provider.anime_search_plan = self._plan_with(eligible=set())
+        variants = provider._build_anime_variants("Episode", self.STRINGS)
+        labels = [label for label, _params in variants]
+        self.assertIn("structured-season-ep", labels)
+        self.assertIn("structured-absolute", labels)
+        self.assertNotIn("free-text", labels)
+
+    def test_ineligible_episode_without_structured_keeps_floor(self):
+        provider = self._provider(torznab=True)
+        provider.anime_search_plan = self._plan_with(eligible=set())
+        variants = provider._build_anime_variants("Episode", self.STRINGS)
+        labels = [label for label, _params in variants]
+        self.assertEqual(labels.count("free-text"), provider.ANIME_FREETEXT_FLOOR)
+        self.assertEqual(len(labels), provider.ANIME_FREETEXT_FLOOR)
+
+    def test_eligible_episode_gets_full_sweep(self):
+        provider = self._provider()
+        provider.anime_search_plan = self._plan_with(eligible={(11, 1)})
+        variants = provider._build_anime_variants("Episode", self.STRINGS)
+        labels = [label for label, _params in variants]
+        self.assertEqual(labels.count("free-text"), 3)
+
+    def test_season_mode_ignores_plan(self):
+        provider = self._provider()
+        provider.anime_search_plan = self._plan_with(eligible=set())
+        variants = provider._build_anime_variants("Season", {"Bleach Season"})
+        labels = [label for label, _params in variants]
+        self.assertIn("free-text", labels)
+
+    def test_no_plan_means_current_behavior(self):
+        provider = self._provider()
+        provider.anime_search_plan = None
+        variants = provider._build_anime_variants("Episode", self.STRINGS)
+        labels = [label for label, _params in variants]
+        self.assertEqual(labels.count("free-text"), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
