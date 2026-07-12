@@ -17,6 +17,7 @@ from sickchill.helper import try_int
 from sickchill.helper.common import episode_num, pretty_file_size
 from sickchill.helper.exceptions import CantUpdateShowException, NoNFOException, ShowDirectoryNotFoundException
 from sickchill.oldbeard import clients, config, db, filters, helpers, notifiers, sab, search_queue, subtitles as subtitle_module, ui
+from sickchill.oldbeard.tvcache import gate_cached_anime_row
 from sickchill.oldbeard.blackandwhitelist import BlackAndWhiteList, short_group_names
 from sickchill.oldbeard.common import FAILED, IGNORED, SKIPPED, SNATCHED_BEST, UNAIRED, WANTED, Overview, Quality, cpu_presets, statusStrings
 from sickchill.oldbeard.scene_numbering import (
@@ -41,6 +42,16 @@ from sickchill.update_manager import UpdateManager
 from sickchill.views.common import PageTemplate
 from sickchill.views.index import WebRoot
 from sickchill.views.routes import Route
+
+
+def _should_reconcile_exceptions(direct_call, exceptions_list, blessed_exceptions_list):
+    """
+    Reconcile custom scene exceptions only when exception data was actually SUBMITTED. The
+    edit-show form always posts the (possibly deliberately empty) fields; a direct mass-edit call
+    never does, and reconciling its empty payload would wipe the user's custom exceptions and
+    blessed season pins.
+    """
+    return not direct_call or bool(exceptions_list) or bool(blessed_exceptions_list)
 
 
 @Route("/home(/?.*)", name="home")
@@ -1268,20 +1279,11 @@ class Home(WebRoot):
             else:
                 exceptions_list = None
 
-        # Map custom exceptions
-        exceptions = {}
-
-        if exceptions_list:
-            # noinspection PyUnresolvedReferences
-            for season in exceptions_list.split(","):
-                season, shows = season.split(":")
-
-                show_list = []
-
-                for cur_show in shows.split("|"):
-                    show_list.append({"show_name": unquote_plus(cur_show), "custom": True})
-
-                exceptions[int(season)] = show_list
+        # Map custom exceptions. Blessed entries are synced rows the user pinned to their season
+        # (custom flag 2) -- the sanctioned override for alias families whose synced season tags
+        # contradict each other. Same wire format as exceptions_list, separate field.
+        blessed_exceptions_list = self.get_body_argument("blessed_exceptions_list", default=None)
+        exceptions = sickchill.oldbeard.scene_exceptions.parse_exceptions_payload(exceptions_list, blessed_exceptions_list)
 
         show_obj.custom_name = custom_name
 
@@ -1430,13 +1432,19 @@ class Home(WebRoot):
 
             time.sleep(cpu_presets[settings.CPU_PRESET])
 
-        logger.debug("Updating show exceptions")
-        try:
-            sickchill.oldbeard.scene_exceptions.update_custom_scene_exceptions(show_obj.indexerid, exceptions)
-            time.sleep(cpu_presets[settings.CPU_PRESET])
-        except CantUpdateShowException:
-            logger.debug("Error updating scene exceptions", exc_info=True)
-            errors.append(_("Unable to force an update on scene exceptions of the show."))
+        # A direct (mass-edit) call has no exceptions UI and always arrives with an empty payload;
+        # reconciling against it would DELETE every custom exception and downgrade every blessed
+        # pin -- silently removing the user's franchise-collision overrides during an unrelated
+        # settings update. Only the real edit-show form (which always submits the fields, possibly
+        # deliberately empty) reconciles.
+        if _should_reconcile_exceptions(direct_call, exceptions_list, blessed_exceptions_list):
+            logger.debug("Updating show exceptions")
+            try:
+                sickchill.oldbeard.scene_exceptions.update_custom_scene_exceptions(show_obj.indexerid, exceptions)
+                time.sleep(cpu_presets[settings.CPU_PRESET])
+            except CantUpdateShowException:
+                logger.debug("Error updating scene exceptions", exc_info=True)
+                errors.append(_("Unable to force an update on scene exceptions of the show."))
 
         if do_update_scene_numbering:
             try:
@@ -1883,12 +1891,23 @@ class Home(WebRoot):
                 [show, season, f"%{episodes_sql}%", FAILED],
             )
 
+        # Franchise gate: a poisoned cache row (wrong-series release filed under this show's
+        # episode) must not be OFFERED for snatching either; the same validation the automated
+        # cache reads run.
+        listing_show = Show.find(settings.show_list, int(show))
+        gated_results = []
         for result in results:
             episodes_list = [int(ep) for ep in result["episodes"].split("|") if ep]
+            if listing_show is not None and episodes_list:
+                episode_object = listing_show.get_episode(int(result["season"]), episodes_list[0])
+                if not gate_cached_anime_row(result["name"], listing_show, int(result["season"]), getattr(episode_object, "scene_season", None)):
+                    continue
             if len(episodes_list) > 1:
                 result["ep_string"] = f"S{result['season']:02}E{min(episodes_list)}-{max(episodes_list)}"
             else:
                 result["ep_string"] = episode_num(result["season"], episodes_list[0])
+            gated_results.append(result)
+        results = gated_results
 
         # TODO: If no cache results do a search on indexers and post back to this method.
 
@@ -1913,6 +1932,24 @@ class Home(WebRoot):
         cache_db_con = db.DBConnection("cache.db", row_type="dict")
         result = cache_db_con.select_one("SELECT * FROM results WHERE url = ?", [url])
         if result:
+            # Franchise gate: re-check at the point of no return. The sanctioned override for a
+            # gated row is a custom scene exception pinning the alias, not a blind snatch of a
+            # row filed under the wrong episode.
+            snatch_show = Show.find(settings.show_list, int(result["indexerid"])) if result.get("indexerid") else None
+            snatch_episodes = [int(ep) for ep in (result.get("episodes") or "").split("|") if ep]
+            if snatch_show is not None and snatch_episodes:
+                episode_object = snatch_show.get_episode(int(result["season"]), snatch_episodes[0])
+                if not gate_cached_anime_row(result["name"], snatch_show, int(result["season"]), getattr(episode_object, "scene_season", None)):
+                    result = json.dumps(
+                        {
+                            "result": "failure",
+                            "message": _(
+                                "This release's title belongs to a different entry in the franchise than the episode it is filed under. "
+                                "If it really is right, add a custom scene exception pinning that name to the correct season, then retry."
+                            ),
+                        }
+                    )
+        if result and not isinstance(result, str):
             provider = sickchill.oldbeard.providers.getProviderClass(result.get("provider"))
             if provider.provider_type == GenericProvider.TORRENT:
                 result = result_classes.TorrentSearchResult.make_result(result)
@@ -1922,7 +1959,7 @@ class Home(WebRoot):
                 result = result_classes.NZBDataSearchResult.make_result(result)
             else:
                 result = json.dumps({"result": "failure", "message": _("Result provider not found, cannot determine type")})
-        else:
+        elif not result:
             result = json.dumps({"result": "failure", "message": _("Result not found in the cache")})
 
         if isinstance(result, str):

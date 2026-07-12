@@ -11,10 +11,25 @@ from sickchill.helper.exceptions import AuthException
 from sickchill.oldbeard import db, show_name_helpers
 from sickchill.oldbeard.bs4_parser import BS4Parser
 from sickchill.oldbeard.databases import cache
-from sickchill.oldbeard.name_parser.parser import InvalidNameException, InvalidShowException, NameParser
+from sickchill.oldbeard.name_parser.parser import franchise_gate, InvalidNameException, InvalidShowException, NameParser
 from sickchill.show.Show import Show
 
 provider_cache_db = {}
+
+
+def gate_cached_anime_row(name, show_obj, season, scene_season=None):
+    """
+    Centralized franchise-consistency check for a cached ``results`` row about to be USED --
+    by automated cache reads (find_needed_episodes), the manual-search listing, and the manual
+    snatch endpoint alike. Rows predating the gate (or written by any other path) are validated
+    on the way out, so no purge of historical rows is needed. True = the row may be served.
+    """
+    if not show_obj or not getattr(show_obj, "is_anime", False):
+        return True
+    allowed, reason = franchise_gate(name, show_obj, season, scene_season=scene_season)
+    if not allowed:
+        logger.debug(f"Ignoring cached result {name}: {reason}")
+    return allowed
 
 
 class RSSTorrentMixin:
@@ -355,6 +370,13 @@ class TVCache(RSSTorrentMixin):
             if not parse_result or not parse_result.series_name:
                 return None
 
+        # An ambiguous ANIME parse carries numbers the parser refused to stand behind (franchise
+        # gate veto or an unresolved reading); caching them would serve a guess to every later
+        # search. Non-anime ambiguous entries keep their historical caching behavior.
+        if getattr(parse_result, "ambiguous", False) and parse_result.show is not None and parse_result.show.is_anime:
+            logger.debug(f"Not caching the ambiguous anime result {name}: {parse_result.ambiguity_reason}")
+            return None
+
         # if we made it this far then lets add the parsed result to cache for usage later on
         season = parse_result.season_number if parse_result.season_number else 1
         episodes = parse_result.episode_numbers
@@ -546,6 +568,12 @@ class TVCache(RSSTorrentMixin):
                 cur_result["name"], {cur_season, getattr(episode_object, "scene_season", None)}
             ):
                 logger.debug("Ignoring cached result {0}: it names a different season than it is filed under".format(cur_result["name"]))
+                continue
+
+            # Franchise gate (cache layer): rows written before the gate existed -- or by any
+            # other path -- must still pass it on the way OUT. This is what protects against
+            # every pre-fix wrong-series row without a purge.
+            if not gate_cached_anime_row(cur_result["name"], show_obj, cur_season, getattr(episode_object, "scene_season", None)):
                 continue
 
             # build a result object

@@ -288,6 +288,21 @@ class GenericProvider(object):
             actual_episodes = []
             actual_season = -1
 
+            # An ambiguous anime parse must not be rule-mapped (the parser refused to pick a
+            # reading -- franchise gate veto or an unresolved season/absolute ambiguity). A
+            # franchise CONFLICT (contradictory season tags) is withheld from the AI matcher too:
+            # no deterministic check could tell a right AI answer from a wrong one there. Every
+            # other ambiguous release goes to the AI matcher, whose proposals are validated by the
+            # same franchise gate.
+            if show.is_anime and getattr(parse_result, "ambiguous", False):
+                if getattr(parse_result, "franchise_conflict", False):
+                    logger.info(
+                        _("Skipping result {title}: {reason}").format(title=title, reason=parse_result.ambiguity_reason)
+                    )
+                elif collect_unmatched_anime:
+                    unmatched_anime_items.append({"item": item, "title": title, "url": url, "size": size, "seeders": seeders, "leechers": leechers})
+                continue
+
             if not (show_object.air_by_date or show_object.sports):
                 if search_mode == "season":
                     if parse_result.episode_numbers:
@@ -436,6 +451,24 @@ class GenericProvider(object):
         return extract_explicit_anime_season(title)
 
     @staticmethod
+    def _extract_release_group(title):
+        """
+        Best-effort release group from a raw title, for results built OUTSIDE the normal parse
+        flow (AI matches). naming_pattern=True skips show resolution, so this cannot raise
+        InvalidShowException; the leading-bracket regex catches fansub names the regexes cannot.
+        """
+        try:
+            parsed = NameParser(parse_method="anime", naming_pattern=True).parse(title, cache_result=False)
+            if parsed and parsed.release_group:
+                return parsed.release_group
+        except (InvalidNameException, InvalidShowException):
+            pass
+        except Exception as error:
+            logger.debug(f"Could not parse a release group out of {title}: {error}")
+        match = re.match(r"^\s*\[(?P<group>[^\]]+)\]", title or "")
+        return match.group("group") if match else ""
+
+    @staticmethod
     def _release_season_conflicts(title, allowed_seasons):
         """
         True if the release name confidently names an explicit season that is NOT among
@@ -522,7 +555,10 @@ class GenericProvider(object):
             result.show = show
             result.name = title
             result.quality = quality
-            result.release_group = ""
+            # A real release group makes BlackAndWhiteList.is_valid work as intended on AI
+            # results: blacklisted groups are rejected by name, and whitelist-bearing shows can
+            # actually accept AI matches (an empty group fails closed against any list).
+            result.release_group = self._extract_release_group(title)
             result.version = -1
             result.content = None
             result.size = self._get_size(item)

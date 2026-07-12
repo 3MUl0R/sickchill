@@ -756,8 +756,12 @@ class SceneAnimeSeasonRelativeTests(conftest.ResetNameCacheMixin, conftest.SickC
         self.assertEqual(result.season_number, 2)
         self.assertEqual(result.episode_numbers, [5])  # must be E5 (raw), not E15 (scene-converted absolute)
 
-    def test_scene_nonexistent_season_relative_falls_back_to_absolute(self):
-        """When the raw number is NOT a valid episode in the mapped season, fall back to series-absolute."""
+    def test_scene_nonexistent_season_relative_refuses_a_cross_season_fallback(self):
+        """When the raw number is NOT a valid episode in the mapped season, the series-absolute
+        fallback fires -- but the franchise gate refuses it when it would land OUTSIDE the season
+        the alias pins. "show name II - 38" with II pinned to S2 and no S2E38 used to file into
+        S3E1 on the absolute fallback; that cross-season guess is exactly the corruption class
+        the gate forbids, so the parse now refuses (ambiguous, no mapping) instead."""
         from sickchill.oldbeard import db
 
         self._make_scene_anime_with_season2_exception()
@@ -766,10 +770,10 @@ class SceneAnimeSeasonRelativeTests(conftest.ResetNameCacheMixin, conftest.SickC
         main_db.action("UPDATE tv_episodes SET absolute_number = 38 WHERE showid = 1 AND indexer = 1 AND season = 3 AND episode = 1")
         self._seed_scene_absolute(scene_absolute_number=38, scene_season=2, absolute_number=38, season=3, episode=1)
 
-        # S2 has no episode 38, so the season-relative branch must not fire; absolute 38 -> S3E1.
         result = parser.NameParser().parse("[Group] show name II - 38 (BD 1920x1080 x265)")
-        self.assertEqual(result.season_number, 3)
-        self.assertEqual(result.episode_numbers, [1])
+        self.assertTrue(result.ambiguous)
+        self.assertIsNone(result.season_number)
+        self.assertEqual(result.episode_numbers, [])
 
 
 class ExplicitAnimeSeasonTests(conftest.ResetNameCacheMixin, conftest.SickChillTestPostProcessorCase):
@@ -807,22 +811,25 @@ class ExplicitAnimeSeasonTests(conftest.ResetNameCacheMixin, conftest.SickChillT
         self.assertEqual(result.season_number, 2)
         self.assertEqual(result.episode_numbers, [3])
 
-    def test_explicit_token_missing_episode_falls_back_to_absolute(self):
-        """When the token's (season, raw-episode) does not exist, A1 must not force the season; the
-        existing series-absolute fallback handles it (no placeholder episode invented)."""
+    def test_explicit_token_missing_episode_refuses_a_cross_season_fallback(self):
+        """When the token's (season, raw-episode) does not exist, A1 must not force the season --
+        and the franchise gate now refuses the series-absolute fallback too, because filing an
+        "S2"-titled release into S4 is the cross-season guess the gate forbids. (Previously this
+        fell through to absolute resolution and mapped S4E5.)"""
         from sickchill.oldbeard import db
 
         self._make_anime()
         self._seed_alias("show name s2")
         # The test show has no S2E99. Give a real episode the series-absolute number 99 so the
-        # fallback resolves deterministically (S4E5), proving A1 fell through to absolute resolution
-        # rather than forcing S2E99.
+        # old fallback WOULD have resolved deterministically (S4E5) -- proving the refusal is the
+        # gate's doing, not a parse failure.
         main_db = db.DBConnection()
         main_db.action("UPDATE tv_episodes SET absolute_number = 99 WHERE showid = 1 AND indexer = 1 AND season = 4 AND episode = 5")
 
         result = parser.NameParser().parse("[Moozzi2] show name S2 - 99 (BD 1920x1080 x264 FLAC)")
-        self.assertEqual(result.season_number, 4)
-        self.assertEqual(result.episode_numbers, [5])
+        self.assertTrue(result.ambiguous)
+        self.assertIsNone(result.season_number)
+        self.assertEqual(result.episode_numbers, [])
 
     def test_strip_not_resolving_same_show_stays_absolute(self):
         """Gate 1: if stripping the season token does NOT resolve to this show, the trailing number is
@@ -842,13 +849,21 @@ class ExplicitAnimeSeasonTests(conftest.ResetNameCacheMixin, conftest.SickChillT
 
         result = parser.NameParser(show_object=self.show).parse("[Group] zzz S2 - 03 (BD 1920x1080 x264 FLAC)")
         self.assertEqual(result.show.indexerid, 1)
-        # Token ignored -> series-absolute 3 -> S1E3, NOT the season-relative S2E3.
-        self.assertEqual(result.season_number, 1)
-        self.assertEqual(result.episode_numbers, [3])
+        # A1's gate still ignores the token as a SEASON SOURCE (that is what this test pins), but
+        # the franchise gate then refuses the series-absolute S1E3 fallback outright: the title
+        # says S2, and filing it into S1 is the forbidden cross-season guess.
+        self.assertTrue(result.ambiguous)
+        self.assertIsNone(result.season_number)
+        self.assertEqual(result.episode_numbers, [])
 
-    def test_exception_season_wins_over_explicit_token(self):
-        """A1 only fills the gap when no scene exception pins a season. If an exception maps the title
-        to a season, that season wins even when the title also carries an explicit S<n> token."""
+    def test_exception_season_conflicting_with_the_token_refuses(self):
+        """A1 only fills the gap when no scene exception pins a season -- but when the exception's
+        pinned season CONTRADICTS the title's explicit token, the franchise gate refuses rather
+        than letting either side win. Release text outranks alias tags in trust, and an alias tag
+        claiming an "S2"-titled release belongs to season 3 is legitimate only when actual scene
+        numbering says so (then the gate's scene-season comparison passes; see
+        test_franchise_collision.ParserChokepointTests.test_scene_divergent_token_compares_in_scene_space).
+        (Previously the exception silently won and this filed S3E5.)"""
         self._make_anime()
         # Pin "show name extra s2" to season 3 (a deliberately different season than the "S2" token).
         # The show is forced so the anime branch is reached (the bare "show name extra" is not aliased).
@@ -856,9 +871,9 @@ class ExplicitAnimeSeasonTests(conftest.ResetNameCacheMixin, conftest.SickChillT
 
         result = parser.NameParser(show_object=self.show).parse("[Moozzi2] show name extra S2 - 05 (BD 1920x1080 x264 FLAC)")
         self.assertEqual(result.show.indexerid, 1)
-        # Exception (season 3) wins over the explicit "S2" token -> S3E5, not S2E5.
-        self.assertEqual(result.season_number, 3)
-        self.assertEqual(result.episode_numbers, [5])
+        self.assertTrue(result.ambiguous)
+        self.assertIsNone(result.season_number)
+        self.assertEqual(result.episode_numbers, [])
 
     def test_scene_show_explicit_token_uses_raw_episode(self):
         """A1 stacked on Fix B for a SCENE anime: the explicit token supplies the season and the

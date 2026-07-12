@@ -3130,22 +3130,22 @@ const SICKCHILL = {
             }); */
 
             $('#submit').on('click', () => {
-                const allExceptions = $('#exceptions_list').find('optgroup').get().map(group => {
-                    const season = $(group).data('season');
-                    const exceptions = $(group).find('option:enabled').get().map(option => {
-                        const exception = $(option).val();
-
-                        return encodeURIComponent(exception);
-                    }).join('|');
+                // Custom (user-typed) names and blessed synced names travel in separate fields:
+                // synced rows are submitted ONLY when pinned, and the server upgrades them in
+                // place instead of duplicating them.
+                const serializeGroup = (group, selector) => {
+                    const exceptions = $(group).find(selector).get().map(option => encodeURIComponent($(option).val())).join('|');
 
                     if (exceptions.length === 0) {
                         return null;
                     }
 
-                    return [season, exceptions].join(':');
-                }).filter(Boolean);
+                    return [$(group).data('season'), exceptions].join(':');
+                };
 
-                $('#exceptions').val(allExceptions);
+                const groups = $('#exceptions_list').find('optgroup').get();
+                $('#exceptions').val(groups.map(group => serializeGroup(group, 'option:not(.empty):not([data-synced])')).filter(Boolean).join(','));
+                $('#blessed_exceptions').val(groups.map(group => serializeGroup(group, 'option[data-synced][data-blessed="1"]')).filter(Boolean).join(','));
 
                 if (metaToBool('show.is_anime')) {
                     generateBlackWhiteList(); // eslint-disable-line no-undef
@@ -3175,8 +3175,20 @@ const SICKCHILL = {
                 $('#SceneName').val('');
             });
 
+            $('#pinSceneName').on('click', () => {
+                // Pin/Unpin the selected SYNCED entry: a pinned entry's season tag is trusted for
+                // this show (stored server-side as a "blessed" exception; unpinning restores it
+                // to a plain synced row).
+                $('#exceptions_list').find('option:selected[data-synced]').each((index, element) => {
+                    const option = $(element);
+                    const blessed = option.attr('data-blessed') === '1' ? '0' : '1';
+                    option.attr('data-blessed', blessed);
+                    option.text(option.val() + (blessed === '1' ? ' \u{1F4CC}' : ''));
+                });
+            });
+
             $('#removeSceneName').on('click', () => {
-                const option = $('#exceptions_list').find('option:selected');
+                const option = $('#exceptions_list').find('option:selected').not('[data-synced]');
                 const group = option.closest('optgroup');
 
                 if (group.find('option').length < 2) {

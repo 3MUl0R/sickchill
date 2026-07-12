@@ -412,6 +412,8 @@ class TestPromptTemplate(unittest.TestCase):
         template = search_matcher._load_prompt_template()
         return template.format(
             show_name="Bleach",
+            startyear=2004,
+            season_structure="- season 1: 20 episodes, absolute 1-20",
             aliases="None",
             wanted_json="[]",
             releases_json="[]",

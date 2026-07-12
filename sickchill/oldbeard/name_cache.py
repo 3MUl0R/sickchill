@@ -72,6 +72,11 @@ def build_name_cache(show=None):
     with name_cache_lock:
         scene_exceptions.retrieve_exceptions()
 
+    # Rebuilding the name cache is the universal "alias data changed" entry point (callers that
+    # write scene_exceptions directly follow up with this call); every generation-stamped derived
+    # view (the normalized alias index, cached parse results) must be invalidated with it.
+    scene_exceptions.invalidate_derived_caches()
+
     if not show:
         # logger.info("Building internal name cache for all shows")
         for show in settings.show_list:

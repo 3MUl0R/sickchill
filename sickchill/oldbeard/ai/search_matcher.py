@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from sickchill import settings
 from sickchill.oldbeard.ai import get_client, get_feedback_manager, get_preferences_manager, get_throttle, is_ai_available
 from sickchill.oldbeard.ai.throttle import ThrottleManager
+from sickchill.oldbeard.name_parser.parser import franchise_gate
 
 if TYPE_CHECKING:
     from sickchill.tv import TVEpisode, TVShow
@@ -123,6 +124,36 @@ def _get_aliases(show: "TVShow") -> List[str]:
             seen.add(key)
             unique.append(alias)
     return unique[:15]
+
+
+def _build_season_structure(show: "TVShow", max_rows: int = 20) -> str:
+    """
+    A compact per-season table (episode count + absolute range) so the AI can see the franchise
+    structure -- e.g. that "Gintama (2015)" content lives in a specific later season with its own
+    absolute range, not at absolute 50. Best effort; returns "unknown" on any problem.
+    """
+    try:
+        from sickchill.oldbeard import db
+
+        main_db_con = db.DBConnection()
+        rows = main_db_con.select(
+            "SELECT season, COUNT(*) AS episodes, MIN(absolute_number) AS abs_min, MAX(absolute_number) AS abs_max "
+            "FROM tv_episodes WHERE showid = ? AND indexer = ? GROUP BY season ORDER BY season",
+            [show.indexerid, show.indexer],
+        )
+    except Exception as error:
+        logger.debug(f"Could not build the season structure for {show.name}: {error}")
+        return "unknown"
+
+    lines = []
+    for row in rows[:max_rows]:
+        absolutes = ""
+        if row["abs_min"] or row["abs_max"]:
+            absolutes = f", absolute {row['abs_min']}-{row['abs_max']}"
+        lines.append(f"- season {row['season']}: {row['episodes']} episodes{absolutes}")
+    if len(rows) > max_rows:
+        lines.append(f"- ... {len(rows) - max_rows} more seasons")
+    return "\n".join(lines) if lines else "unknown"
 
 
 def _build_wanted_json(episodes: List["TVEpisode"]) -> str:
@@ -237,6 +268,8 @@ def match_results(
         reasoning_field = ',\n      "reasoning": "<brief explanation>"' if settings.AI_SEARCH_MATCH_INCLUDE_REASONING else ""
         prompt = template.format(
             show_name=show.name,
+            startyear=getattr(show, "startyear", None) or "unknown",
+            season_structure=_build_season_structure(show),
             aliases=", ".join(aliases) if aliases else "None",
             wanted_json=_build_wanted_json(episodes),
             releases_json=_build_releases_json(items),
@@ -328,6 +361,16 @@ def _validate_matches(
             continue
         if (season, episode) not in wanted:
             logger.debug(f"AI search match: rejecting S{season}E{episode} (not a wanted episode of {show.name})")
+            continue
+        # Franchise gate (deterministic, reject-only): the prompt's franchise guidance is advice,
+        # THIS is the safety boundary. A title carrying a year/alias/sequel-marker/season-token
+        # the proposed season cannot explain is rejected no matter how confident the AI is --
+        # this is exactly how "[Abystoma] Gintama (2015)-50" was twice mapped to classic S2E1.
+        title = items[index].get("title") or ""
+        matched_episode = next((ep for ep in episodes if ep.season == season and ep.episode == episode), None)
+        allowed, reason = franchise_gate(title, show, season, scene_season=getattr(matched_episode, "scene_season", None))
+        if not allowed:
+            logger.info(f"AI search match for {show.name}: rejecting '{title}' -> S{season}E{episode}: {reason}")
             continue
         # Confidence must be an explicit, finite number in [0, 1] (no missing/bool/NaN/out-of-range).
         if not _is_valid_confidence(confidence):

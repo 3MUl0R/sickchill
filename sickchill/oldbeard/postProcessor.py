@@ -23,7 +23,7 @@ from sickchill.helper.common import SUBTITLE_EXTENSIONS, episode_num, get_extens
 from sickchill.helper.exceptions import EpisodeNotFoundException, EpisodePostProcessingFailedException, ShowDirectoryNotFoundException
 from sickchill.oldbeard import common, db, helpers, notifiers, show_name_helpers
 from sickchill.oldbeard.helpers import verify_freespace
-from sickchill.oldbeard.name_parser.parser import InvalidNameException, InvalidShowException, NameParser
+from sickchill.oldbeard.name_parser.parser import franchise_gate, InvalidNameException, InvalidShowException, NameParser
 from sickchill.show.History import History
 from sickchill.show.Show import Show
 
@@ -768,6 +768,52 @@ class PostProcessor(object):
             except Exception as error:
                 self._log(f"exception msg: {error}")
 
+    def _validate_identity(self, show, season, episodes):
+        """
+        Final validation of a candidate (show, season, episodes) identity, whatever its source
+        (history row, rule parse, AI). Returns a rejection reason, or None when the identity is
+        acceptable.
+
+        Two checks: every episode must EXIST for the show, and for an anime show every
+        release-bearing input (release name, file name, folder name -- except the download root)
+        must pass the deterministic franchise gate against the proposed season. Any veto fails
+        closed: a poisoned history row or a lucky parse of a wrong-franchise release must not
+        write bytes into a real episode's slot.
+        """
+        int_episodes = [episode for episode in episodes if isinstance(episode, int) and not isinstance(episode, bool)]
+        if len(int_episodes) != len(episodes):
+            # By the time an identity is complete, every episode must be a real int (air-by-date
+            # conversion happened earlier). A bool or leftover date means the identity is not
+            # trustworthy; reject it whole rather than validating a filtered subset.
+            return "the episode list contains non-integer entries"
+        if int_episodes and isinstance(season, int) and not isinstance(season, bool):
+            main_db_con = db.DBConnection()
+            for episode in int_episodes:
+                if not main_db_con.select_one(
+                    "SELECT 1 FROM tv_episodes WHERE showid = ? AND indexer = ? AND season = ? AND episode = ?",
+                    [show.indexerid, show.indexer, season, episode],
+                ):
+                    return f"S{season}E{episode} does not exist for {show.name}"
+
+        if getattr(show, "is_anime", False) and isinstance(season, int) and not isinstance(season, bool):
+            scene_season = None
+            if int_episodes:
+                try:
+                    scene_season = getattr(show.get_episode(season, int_episodes[0]), "scene_season", None)
+                except Exception:
+                    scene_season = None
+            download_root = os.path.basename((settings.TV_DOWNLOAD_DIR or "").rstrip("\\/"))
+            for label, name in (("release name", self.release_name), ("file name", self.filename), ("folder name", self.folder_name)):
+                if not name:
+                    continue
+                if label == "folder name" and download_root and name == download_root:
+                    continue
+                allowed, reason = franchise_gate(name, show, season, scene_season=scene_season)
+                if not allowed:
+                    return f"the {label} [{name}] fails the franchise check: {reason}"
+
+        return None
+
     def _find_info(self):
         """
         For a given file try to find the showid, season, and episode.
@@ -795,6 +841,9 @@ class PostProcessor(object):
 
         # attempt every possible method to get our info
         for cur_attempt in attempt_list:
+            # A candidate rejected by _validate_identity must not leave its fields behind for a
+            # later attempt to build on; roll back to this snapshot and keep iterating.
+            snapshot = (show, season, list(episodes), quality, version)
             try:
                 cur_show, cur_season, cur_episodes, cur_quality, cur_version = cur_attempt()
             except (InvalidNameException, InvalidShowException) as error:
@@ -865,6 +914,11 @@ class PostProcessor(object):
                     season = 1
 
             if show and season and episodes:
+                rejection = self._validate_identity(show, season, episodes)
+                if rejection:
+                    self._log(f"Rejecting this source's identity for the file: {rejection}", logger.INFO)
+                    show, season, episodes, quality, version = snapshot
+                    continue
                 return show, season, episodes, quality, version
 
         # An ambiguous name is not a parsing failure the AI can rescue -- it is a name with two
@@ -910,6 +964,14 @@ class PostProcessor(object):
                     "cannot determine the episode for this file",
                     logger.INFO,
                 )
+
+        # Exit belt: whatever completion path produced this identity (including the AI return,
+        # which the matcher already validated once), it does not leave this method unvalidated.
+        if show and season is not None and episodes:
+            rejection = self._validate_identity(show, season, episodes)
+            if rejection:
+                self._log(f"Refusing to post-process: {rejection}", logger.WARNING)
+                return None, None, [], None, None
 
         return show, season, episodes, quality, version
 

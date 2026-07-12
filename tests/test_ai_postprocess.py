@@ -90,6 +90,15 @@ class TestMatchFileFunction(unittest.TestCase):
             "Test prompt: {filename} {folder_name} {relative_path} {release_name} {file_size_mb} {duration} {candidate_shows_json}"
         )
 
+        # The validator now loads the matched show and verifies the episodes exist; give every
+        # test a loadable non-anime show and an existing episode by default.
+        self.validated_show = mock.MagicMock(indexerid=12345, indexer=1, is_anime=False)
+        self.validated_show.name = "Test Show"
+        self.show_find_patcher = mock.patch("sickchill.show.Show.Show.find", return_value=self.validated_show)
+        self.show_find_patcher.start()
+        self.db_patcher = mock.patch("sickchill.oldbeard.db.DBConnection")
+        self.db_patcher.start().return_value.select_one.return_value = {"1": 1}
+
     def tearDown(self):
         """Clean up patches."""
         self.settings_patcher.stop()
@@ -97,6 +106,8 @@ class TestMatchFileFunction(unittest.TestCase):
         self.get_throttle_patcher.stop()
         self.get_client_patcher.stop()
         self.candidates_patcher.stop()
+        self.show_find_patcher.stop()
+        self.db_patcher.stop()
         self.template_patcher.stop()
 
     def test_returns_none_when_ai_not_available(self):
@@ -314,7 +325,7 @@ class TestValidateMatchResult(unittest.TestCase):
     """Test the _validate_match_result function."""
 
     def test_valid_result_passes(self):
-        """Test that a valid result passes validation."""
+        """Test that a valid result passes validation (show loadable, episodes exist)."""
         from sickchill.oldbeard.ai.postprocess_matcher import _validate_match_result
 
         result = {
@@ -325,10 +336,46 @@ class TestValidateMatchResult(unittest.TestCase):
         }
         candidates = [{"indexer_id": 12345}]
 
-        is_valid, reason = _validate_match_result(result, candidates)
+        mock_show = mock.MagicMock(indexerid=12345, indexer=1, is_anime=False)
+        with mock.patch("sickchill.show.Show.Show.find", return_value=mock_show):
+            with mock.patch("sickchill.oldbeard.db.DBConnection") as mock_db:
+                mock_db.return_value.select_one.return_value = {"1": 1}
+                is_valid, reason = _validate_match_result(result, candidates)
 
         self.assertTrue(is_valid)
         self.assertIsNone(reason)
+
+    def test_nonexistent_episode_fails(self):
+        """An AI answer naming an episode the show does not have is rejected whole ('Gintama
+        (2015) - 51' was matched to S1E51, which does not exist -- the import only failed
+        downstream by luck)."""
+        from sickchill.oldbeard.ai.postprocess_matcher import _validate_match_result
+
+        result = {"show_indexer_id": 12345, "season": 1, "episodes": [5, 51], "confidence": 0.95}
+        candidates = [{"indexer_id": 12345}]
+
+        mock_show = mock.MagicMock(indexerid=12345, indexer=1, is_anime=False)
+        mock_show.name = "Test Show"
+        with mock.patch("sickchill.show.Show.Show.find", return_value=mock_show):
+            with mock.patch("sickchill.oldbeard.db.DBConnection") as mock_db:
+                mock_db.return_value.select_one.side_effect = [{"1": 1}, None]
+                is_valid, reason = _validate_match_result(result, candidates)
+
+        self.assertFalse(is_valid)
+        self.assertIn("does not exist", reason)
+
+    def test_unloadable_show_fails(self):
+        """A show id the library cannot load is rejected even when it was in the candidate list."""
+        from sickchill.oldbeard.ai.postprocess_matcher import _validate_match_result
+
+        result = {"show_indexer_id": 12345, "season": 1, "episodes": [5], "confidence": 0.95}
+        candidates = [{"indexer_id": 12345}]
+
+        with mock.patch("sickchill.show.Show.Show.find", return_value=None):
+            is_valid, reason = _validate_match_result(result, candidates)
+
+        self.assertFalse(is_valid)
+        self.assertIn("could not be loaded", reason)
 
     def test_negative_one_is_valid(self):
         """Test that -1 (no match) is a valid response."""

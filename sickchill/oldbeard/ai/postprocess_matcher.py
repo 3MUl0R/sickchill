@@ -169,6 +169,7 @@ def _get_candidate_shows(filename: str, folder_name: str, release_name: Optional
                 "indexer_id": show.indexerid,
                 "indexer": show.indexer,
                 "name": show.name,
+                "first_aired_year": getattr(show, "startyear", None) or None,
                 "aliases": alias_names[:5],  # Limit aliases for prompt
                 "score": score,
             }
@@ -194,6 +195,7 @@ def _format_candidates_for_prompt(candidates: List[Dict[str, Any]]) -> str:
                 "indexer_id": candidate["indexer_id"],
                 "indexer": candidate["indexer"],
                 "name": candidate["name"],
+                "first_aired_year": candidate.get("first_aired_year"),
                 "aliases": candidate.get("aliases", []),
             }
         )
@@ -232,13 +234,23 @@ def _get_file_info(file_path: str) -> Dict[str, Any]:
 def _validate_match_result(
     result: Dict[str, Any],
     candidates: List[Dict[str, Any]],
+    filename: str = "",
+    folder_name: str = "",
+    release_name: Optional[str] = None,
 ) -> tuple[bool, Optional[str]]:
     """
     Validate the AI's match result.
 
+    Beyond type checks: every named (season, episode) must actually EXIST for the matched show
+    (the AI once matched "Gintama (2015) - 51" to S1E51, which does not exist -- the import only
+    failed downstream by luck), and for an anime show every release-bearing input must pass the
+    deterministic franchise gate against the proposed season. The prompt's franchise guidance is
+    advice; this is the safety boundary.
+
     Args:
         result: The AI response dict
         candidates: The candidate shows that were provided to AI
+        filename/folder_name/release_name: the identity-bearing inputs the AI saw
 
     Returns:
         Tuple of (is_valid, rejection_reason)
@@ -254,9 +266,9 @@ def _validate_match_result(
     if show_id not in valid_ids:
         return False, f"AI returned show ID {show_id} which was not in candidate list"
 
-    # Basic sanity checks
+    # Basic sanity checks. bool is an int subclass, so exclude it explicitly.
     season = result.get("season")
-    if season is not None and (not isinstance(season, int) or season < 0):
+    if season is not None and (not isinstance(season, int) or isinstance(season, bool) or season < 0):
         return False, f"Invalid season number: {season}"
 
     episodes = result.get("episodes", [])
@@ -264,7 +276,7 @@ def _validate_match_result(
         if not isinstance(episodes, list):
             return False, "Episodes must be a list"
         for ep in episodes:
-            if not isinstance(ep, int) or ep < 0:
+            if not isinstance(ep, int) or isinstance(ep, bool) or ep < 0:
                 return False, f"Invalid episode number: {ep}"
 
     # For a successful match, require season and episodes to be present
@@ -273,6 +285,52 @@ def _validate_match_result(
         return False, "Match found but season is missing"
     if not episodes:
         return False, "Match found but episodes list is empty"
+
+    show = None
+    try:
+        from sickchill.show.Show import Show
+
+        show = Show.find(settings.show_list, show_id)
+    except Exception as error:
+        logger.debug(f"Could not load show {show_id} to validate the AI match: {error}")
+    if show is None:
+        return False, f"AI matched show {show_id}, which could not be loaded from the library"
+
+    # Every proposed episode must exist; a partially-nonexistent identity is not trustworthy,
+    # so the whole match is rejected rather than trimmed.
+    try:
+        from sickchill.oldbeard import db
+
+        main_db_con = db.DBConnection()
+        for ep in episodes:
+            if not main_db_con.select_one(
+                "SELECT 1 FROM tv_episodes WHERE showid = ? AND indexer = ? AND season = ? AND episode = ?",
+                [show.indexerid, show.indexer, season, ep],
+            ):
+                return False, f"S{season}E{ep} does not exist for {show.name}"
+    except Exception as error:
+        return False, f"Could not verify the proposed episodes exist: {error}"
+
+    # Franchise gate over every release-bearing input; ANY veto fails the match closed.
+    if getattr(show, "is_anime", False):
+        from sickchill.oldbeard.name_parser.parser import franchise_gate
+
+        scene_season = None
+        try:
+            episode_object = show.get_episode(season, episodes[0])
+            scene_season = getattr(episode_object, "scene_season", None)
+        except Exception:
+            pass
+
+        download_root = os.path.basename((settings.TV_DOWNLOAD_DIR or "").rstrip("\\/"))
+        for label, title in (("release name", release_name), ("file name", filename), ("folder name", folder_name)):
+            if not title:
+                continue
+            if label == "folder name" and download_root and title == download_root:
+                continue
+            allowed, reason = franchise_gate(title, show, season, scene_season=scene_season)
+            if not allowed:
+                return False, f"the {label} fails the franchise check: {reason}"
 
     return True, None
 
@@ -364,7 +422,7 @@ def match_file(
         # later post-processing failure (e.g. episode lookup/move) can be retried immediately;
         # the 30-day response cache still prevents re-billing the AI. count_budget=not was_cached
         # so a cache hit records bookkeeping without billing the hourly/daily call budget.
-        is_valid, rejection_reason = _validate_match_result(response, candidates)
+        is_valid, rejection_reason = _validate_match_result(response, candidates, filename=filename, folder_name=folder_name, release_name=release_name)
         show_id = response.get("show_indexer_id", -1) if is_valid else -1
         confidence = response.get("confidence", 0.0)
         reasoning = response.get("reasoning", "No reasoning provided")

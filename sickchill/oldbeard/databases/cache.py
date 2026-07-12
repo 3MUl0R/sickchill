@@ -27,6 +27,7 @@ class InitialSchema(db.SchemaUpgrade):
             ("CREATE UNIQUE INDEX IF NOT EXISTS idx_url ON results (url);",),
             ("CREATE INDEX IF NOT EXISTS provider ON results (provider);",),
             ("CREATE INDEX IF NOT EXISTS seeders ON results (seeders);",),
+            ("CREATE UNIQUE INDEX IF NOT EXISTS idx_scene_exceptions_unique ON scene_exceptions (indexer_id, show_name, season);",),
         )
         for query in queries:
             self.connection.action(query[0])
@@ -335,3 +336,58 @@ class ResultsIndexes(AISchemaRepair):
             return
 
         self.connection.action(f"CREATE INDEX IF NOT EXISTS {self.index_name} ON results (indexerid, season, provider)")
+
+
+class SceneExceptionsUnique(ResultsIndexes):
+    """Dedupe scene_exceptions and give it the unique index INSERT OR IGNORE always assumed.
+
+    The table has no unique constraint, so retrieve_exceptions' INSERT OR IGNORE never ignored:
+    every sync re-inserted every row (a production box reached ~81k rows of 15-30x duplicates,
+    bloating the full-table fallback scan in get_scene_exception_by_name_multiple and every name
+    cache rebuild). The index deliberately EXCLUDES the custom column: one row per
+    (indexer_id, show_name, season) with custom as a flag on it, so a sync's INSERT OR IGNORE can
+    never displace or downgrade a user's custom/blessed row.
+    """
+
+    index_name = "idx_scene_exceptions_unique"
+
+    def test(self):
+        # Name-independent: ANY unique index on scene_exceptions covering exactly
+        # (indexer_id, show_name, season) satisfies the schema requirement -- the name alone
+        # proves nothing (it could even belong to another table).
+        for index in self.connection.select("PRAGMA index_list(scene_exceptions)"):
+            if not int(index["unique"]):
+                continue
+            columns = [info["name"] for info in self.connection.select("PRAGMA index_info({0})".format(index["name"]))]
+            if columns == ["indexer_id", "show_name", "season"]:
+                return True
+        return False
+
+    def execute(self):
+        if not self.has_table("scene_exceptions"):
+            return
+
+        # Keep ONE row per (indexer_id, show_name, season), preferring the user's row (highest
+        # custom flag), then the oldest. mass_action commits the dedupe and the index creation as
+        # ONE transaction (rollback on any failure), so a crash cannot leave the table deduped
+        # but unconstrained, or half-deduped.
+        self.connection.mass_action(
+            [
+                [
+                    """
+                    DELETE FROM scene_exceptions WHERE exception_id NOT IN (
+                        SELECT exception_id FROM (
+                            SELECT exception_id,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY indexer_id, show_name, season
+                                       ORDER BY custom DESC, exception_id ASC
+                                   ) AS rn
+                            FROM scene_exceptions
+                        ) WHERE rn = 1
+                    )
+                    """
+                ],
+                [f"DROP INDEX IF EXISTS {self.index_name}"],
+                [f"CREATE UNIQUE INDEX {self.index_name} ON scene_exceptions (indexer_id, show_name, season)"],
+            ]
+        )

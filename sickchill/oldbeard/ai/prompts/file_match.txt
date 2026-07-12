@@ -27,6 +27,11 @@ Identify which show and episode(s) this file most likely represents.
 3. Consider absolute episode numbering for anime (e.g., "Episode 123")
 4. Air-by-date shows may use formats like 2024.01.15 or 2024-01-15
 5. Multi-episode files may contain patterns like S01E01E02 or S01E01-E03
+6. FRANCHISE SUB-SERIES ARE NOT THE BASE SHOW'S NUMBERING. A year ("Gintama (2015)"), a roman
+   numeral ("Mushoku Tensei II"), or a sequel/arc subtitle in the name denotes a specific entry
+   in a franchise whose OWN episode numbering restarts from 1. Compare against each candidate's
+   first_aired_year; if the file names a sub-series that does not correspond to the candidate's
+   season/episode you would assign, return show_indexer_id: -1 rather than guessing.
 
 ## Confidence Guidelines
 - 0.9+ : Clear match with show name and episode numbers visible

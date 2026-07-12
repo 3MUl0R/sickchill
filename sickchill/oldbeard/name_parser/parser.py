@@ -24,12 +24,267 @@ if TYPE_CHECKING:
 
 # Confident explicit-season detection for anime release names. Shared by the parser (A1: read the
 # token as the season so search maps "K-ON S2 - 01" -> S2E01) and by GenericProvider's cross-season
-# guards (A2). These depend only on ``re`` so they stay leaf code: GenericProvider/tvcache already
-# import this module, and nothing here imports them, so no import cycle is introduced.
+# guards (A2). These depend only on ``re`` and scene_exceptions so they stay leaf code:
+# GenericProvider/tvcache already import this module, and nothing here imports them, so no import
+# cycle is introduced.
 _ANIME_SEASON_BRACKET_RE = re.compile(r"[\[(][^\])]*[\])]")
 # S<n> / S0<n> / Season <n> as a STANDALONE token: not preceded or followed by an alnum, so SxxExx
 # codes (S02E03) and stray tags ("S2Productions" / "S2x264") are not mistaken for a bare season.
 _ANIME_SEASON_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])S(?:eason)?[ ._]?(\d{1,2})(?![A-Za-z0-9])", re.IGNORECASE)
+# A bracket/paren group whose ENTIRE content is a season token ("(S2)", "[S02]", "(Season 2)").
+# Group/codec blocks ("[S2Productions]") never match because of the closing anchor.
+_TOKEN_ONLY_SEASON_BLOCK_RE = re.compile(r"[\[(]\s*S(?:eason)?[ ._]?(\d{1,2})\s*[\])]", re.IGNORECASE)
+
+# --- Franchise-collision helpers (see .codex-reviews/franchise_collision_plan.md) -------------
+# A sub-series in a franchise restarts its own numbering, so a title carrying a disambiguator the
+# resolved show cannot explain (a year, a roman numeral, a season token for another season) must
+# not be mapped onto that show. franchise_gate() below is the single decision function; the
+# parser, search, cache reads, the AI matchers, and post-processing all call it.
+
+# The leading [\...] block is the release group by convention and never carries franchise meaning.
+_LEADING_GROUP_BLOCK_RE = re.compile(r"^\s*\[[^\]]*\]")
+_SQUARE_BLOCK_RE = re.compile(r"\[[^\]]*\]")
+# A standalone year: digit-bounded, and excluded when written as a resolution -- 1920 and 2160
+# are year-shaped ("1920x1080", "2160p"), so a resolution glyph on either side disqualifies.
+_TITLE_YEAR_RE = re.compile(r"(?<!\d)(?<![xX×])(?:19|20)\d{2}(?!\d)(?![xXpi×])")
+# A bracket/paren group whose entire content is a year ("[2015]", "(2015)").
+_TOKEN_ONLY_YEAR_BLOCK_RE = re.compile(r"[\[(]\s*((?:19|20)\d{2})\s*[\])]")
+# Sequel markers: uppercase roman numerals II..IX as standalone tokens. I and X are deliberately
+# excluded (single letters collide with initialisms far too often), and the match is
+# case-sensitive because sequel numerals are written uppercase while a lowercase "v" is usually
+# "versus" or a version tag.
+_ROMAN_MARKER_TOKENS = ("II", "III", "IV", "V", "VI", "VII", "VIII", "IX")
+_SXXEYY_TOKEN_RE = re.compile(r"^S\d{1,2}E\d{1,4}$", re.IGNORECASE)
+_TITLE_SPAN_TOKEN_RE = re.compile(r"\[[^\]]*\]|\([^)]*\)|\S+")
+
+
+def extract_title_years(title):
+    """
+    Standalone 19xx/20xx year tokens that speak to the TITLE's identity: everything outside
+    square-bracket metadata blocks, plus any bracket/paren group that is ONLY a year ("[2015]").
+    The leading release-group block is exempt.
+    """
+    if not title:
+        return set()
+    core = _LEADING_GROUP_BLOCK_RE.sub(" ", title)
+    years = {int(match.group(0)) for match in _TITLE_YEAR_RE.finditer(_SQUARE_BLOCK_RE.sub(" ", core))}
+    years.update(int(match.group(1)) for match in _TOKEN_ONLY_YEAR_BLOCK_RE.finditer(core))
+    return years
+
+
+def _known_show_names(show):
+    """Every raw name the show is known by: canonical, custom, and all scene-exception aliases."""
+    names = [name for name in (getattr(show, "name", None), getattr(show, "custom_name", None)) if name]
+    try:
+        index = scene_exceptions.get_normalized_alias_index(show.indexerid)
+    except Exception as error:
+        logger.debug(f"Could not load the alias index for {getattr(show, 'name', show)}: {error}")
+        index = {}
+    for rows in index.values():
+        names.extend(raw_name for raw_name, _, _ in rows)
+    return names
+
+
+def extract_sequel_markers(title, show=None):
+    """
+    Roman-numeral sequel markers (II..IX) found in the series-title span of a release name.
+
+    The span walk terminates at the first episode-like token -- a standalone 1-4 digit number
+    (bare or bracketed like "[03]") or an SxxEyy code -- UNLESS that number appears as a
+    standalone token in one of the show's known names ("86 II - 01" must walk past the "86").
+    Within the span, bracket groups are metadata and skipped, except a token-only bracketed
+    numeral ("[II]"), which counts. The leading release-group block is always exempt.
+    """
+    if not title:
+        return set()
+
+    known_numbers = set()
+    if show is not None:
+        for name in _known_show_names(show):
+            known_numbers.update(re.findall(r"(?<![A-Za-z0-9])\d{1,4}(?![A-Za-z0-9])", name))
+
+    core = _LEADING_GROUP_BLOCK_RE.sub(" ", title)
+    markers = set()
+    for match in _TITLE_SPAN_TOKEN_RE.finditer(core):
+        token = match.group(0)
+        if token[0] in "[(":
+            inner = token[1:-1].strip()
+            if inner in _ROMAN_MARKER_TOKENS:
+                markers.add(inner)
+            elif inner.isdigit() and 1 <= len(inner) <= 4 and inner.lstrip("0") not in known_numbers and inner not in known_numbers:
+                break
+            continue
+        # Bare token: strip common joining punctuation off the edges before classifying.
+        word = token.strip(".,:;-_~")
+        if not word:
+            continue
+        if _SXXEYY_TOKEN_RE.match(word):
+            break
+        if word.isdigit() and 1 <= len(word) <= 4:
+            if word in known_numbers or word.lstrip("0") in known_numbers:
+                continue
+            break
+        if word in _ROMAN_MARKER_TOKENS:
+            markers.add(word)
+    return markers
+
+
+def _padded_contains(needle, haystack):
+    """Token-boundary containment for normalized names ('k on' must not match inside 'back onto')."""
+    return f" {needle} " in f" {haystack} "
+
+
+def _family_seasons(rows):
+    """
+    The concrete seasons an alias family pins, with the user's rows overriding synced ones:
+    if any row is custom/blessed, only those count (the repair channel for polluted sync data).
+    """
+    customs = {season for _, season, custom in rows if custom in (scene_exceptions.CUSTOM_USER, scene_exceptions.CUSTOM_BLESSED) and season != -1}
+    if customs:
+        return customs
+    return {season for _, season, custom in rows if season != -1}
+
+
+def alias_season_pins(text, show):
+    """
+    The seasons pinned by the LONGEST scene-exception alias contained in ``text``, as
+    ``(seasons, conflicted)``, or None when no alias matches or only season -1 rows do.
+    Family = every exception row sharing the matched alias's normalized form, so "II - Isekai"
+    and "II Isekai" (the same alias written two ways, tagged to different seasons by polluted
+    upstream data) are seen as ONE conflicted family.
+    """
+    if not text or not show:
+        return None
+    try:
+        index = scene_exceptions.get_normalized_alias_index(show.indexerid)
+    except Exception as error:
+        logger.debug(f"Could not load the alias index for {getattr(show, 'name', show)}: {error}")
+        return None
+
+    normalized_text = scene_exceptions.normalize_alias_name(text)
+    best = None
+    for normalized in index:
+        if _padded_contains(normalized, normalized_text):
+            if best is None or len(normalized) > len(best):
+                best = normalized
+    if best is None:
+        return None
+
+    seasons = _family_seasons(index[best])
+    if not seasons:
+        return None
+    return seasons, len(seasons) > 1
+
+
+def franchise_gate(title, show, indexer_season, scene_season=None):
+    """
+    THE franchise-consistency decision: may ``title`` be mapped to ``indexer_season`` of ``show``?
+
+    Returns (allowed, reason). Reject-only -- a False verdict never re-files anything, it only
+    stops a mapping. Signals are compared in their own numbering namespace: alias/year pins are
+    XEM origin=tvdb data (indexer seasons); an explicit season token is release text (compared
+    against ``scene_season`` when the caller knows it, else ``indexer_season``). Non-anime shows
+    always pass; with no exception data at all, the year/marker/token rules still fail closed on
+    disambiguated titles.
+    """
+    if not title or not show or not getattr(show, "is_anime", False):
+        return True, None
+
+    try:
+        index = scene_exceptions.get_normalized_alias_index(show.indexerid)
+    except Exception as error:
+        logger.debug(f"Could not load the alias index for {getattr(show, 'name', show)}: {error}")
+        index = {}
+
+    normalized_title = scene_exceptions.normalize_alias_name(title)
+    best_alias = None
+    for normalized in index:
+        if _padded_contains(normalized, normalized_title):
+            if best_alias is None or len(normalized) > len(best_alias):
+                best_alias = normalized
+
+    # 0 doubles as "no scene mapping" in tv_episodes.scene_season, so only a positive scene
+    # season replaces the indexer season for release-text comparisons (S0 specials compare the
+    # same either way, since their indexer season is also 0).
+    release_space_season = scene_season if scene_season else indexer_season
+
+    # 1) Explicit season token. Release text is the most trustworthy signal (rank 1); it must
+    #    match the release-space season, full stop -- even when an alias embeds the same token
+    #    with a different tag (a scene name "Show S2" that XEM maps to indexer S3 is legitimate
+    #    ONLY when actual scene numbering says so, and then the caller's scene_season already
+    #    matches the token; without that data, refusing beats trusting the rank-3 alias tag).
+    token_season = extract_explicit_anime_season(title)
+    if token_season is not None and release_space_season is not None and token_season != release_space_season:
+        return False, _("the title names season {token_season} but the mapping is to season {mapped}").format(
+            token_season=token_season, mapped=release_space_season
+        )
+
+    # 2) Years: neutral when the show itself explains them, season-checked when an alias carries
+    #    them, veto when nothing does.
+    show_names_text = " ".join(name for name in (getattr(show, "name", None), getattr(show, "custom_name", None)) if name)
+    show_years = {int(match.group(0)) for match in _TITLE_YEAR_RE.finditer(show_names_text)}
+    for year in sorted(extract_title_years(title)):
+        if getattr(show, "startyear", None) and year == show.startyear:
+            continue
+        if year in show_years:
+            continue
+        year_re = re.compile(rf"(?<!\d){year}(?!\d)")
+        pinned = set()
+        year_in_alias = False
+        for normalized, rows in index.items():
+            if year_re.search(normalized):
+                year_in_alias = True
+                pinned |= _family_seasons(rows)
+        if year_in_alias:
+            if not pinned:
+                continue
+            if indexer_season is not None and indexer_season in pinned:
+                continue
+            return False, _("the year {year} in the title belongs to season(s) {seasons}, not season {mapped}").format(
+                year=year, seasons=sorted(pinned), mapped=indexer_season
+            )
+        return False, _("the title carries the year {year}, which is not this show's year ({startyear}) or any known alias").format(
+            year=year, startyear=getattr(show, "startyear", None)
+        )
+
+    # 3) Alias pin: a conflicted family vetoes outright (the season tags contradict each other,
+    #    so every deterministic guess is a coin flip); a clean pin must include the mapping.
+    if best_alias is not None:
+        seasons = _family_seasons(index[best_alias])
+        if len(seasons) > 1:
+            return False, _("the alias '{alias}' is season-tagged to multiple seasons {seasons} in scene exceptions; add a custom exception to pin the right one").format(
+                alias=best_alias, seasons=sorted(seasons)
+            )
+        if seasons and indexer_season is not None and indexer_season not in seasons:
+            return False, _("the alias '{alias}' pins season {seasons}, not season {mapped}").format(
+                alias=best_alias, seasons=sorted(seasons), mapped=indexer_season
+            )
+
+    # 4) Sequel markers must be explained by the show's own names or by a matched, season-pinning
+    #    alias family; when pins exist they must include the mapping.
+    for marker in sorted(extract_sequel_markers(title, show)):
+        if re.search(rf"(?<![A-Za-z0-9]){marker}(?![A-Za-z0-9])", show_names_text):
+            continue
+        marker_lower = marker.lower()
+        pins = set()
+        marker_matched = False
+        for normalized, rows in index.items():
+            if _padded_contains(normalized, normalized_title) and _padded_contains(marker_lower, normalized):
+                marker_matched = True
+                pins |= _family_seasons(rows)
+        if pins:
+            if indexer_season is not None and indexer_season not in pins:
+                return False, _("the sequel marker '{marker}' belongs to season(s) {seasons}, not season {mapped}").format(
+                    marker=marker, seasons=sorted(pins), mapped=indexer_season
+                )
+            continue
+        if marker_matched:
+            # Matched only season -1 aliases: the marker is known but pins nothing, so a mapping
+            # would still be the coin flip this gate exists to forbid.
+            return False, _("the sequel marker '{marker}' matches only season-less aliases; add a custom exception to pin its season").format(marker=marker)
+        return False, _("the title carries the sequel marker '{marker}', which no known name of this show explains").format(marker=marker)
+
+    return True, None
 
 
 # The most episodes a single video file may legitimately contain. Already enforced for ``ep_num``
@@ -92,6 +347,12 @@ def extract_explicit_anime_season(title):
         return None
     core = _ANIME_SEASON_BRACKET_RE.sub(" ", title)
     match = _ANIME_SEASON_TOKEN_RE.search(core)
+    if match:
+        return int(match.group(1))
+    # A season token that is a bracket/paren group's ENTIRE content ("(S2)", "[Season 2]") is just
+    # as confident; the bracket-strip above removed it, so look for it separately. The leading
+    # release-group block is exempt by convention.
+    match = _TOKEN_ONLY_SEASON_BLOCK_RE.search(_LEADING_GROUP_BLOCK_RE.sub(" ", title))
     return int(match.group(1)) if match else None
 
 
@@ -105,7 +366,9 @@ def strip_explicit_anime_season(title):
     """
     if not title:
         return title
-    return re.sub(r"\s+", " ", _ANIME_SEASON_TOKEN_RE.sub(" ", title)).strip()
+    # Block form first: stripping the bare token out of "(S2)" first would leave an empty "()".
+    stripped = _ANIME_SEASON_TOKEN_RE.sub(" ", _TOKEN_ONLY_SEASON_BLOCK_RE.sub(" ", title))
+    return re.sub(r"\s+", " ", stripped).strip()
 
 
 class NameParser(object):
@@ -320,6 +583,11 @@ class NameParser(object):
             new_season_numbers = []
             new_absolute_numbers = []
 
+            # The season as the RELEASE TEXT wrote it, before any scene->indexer conversion; the
+            # franchise gate compares release-text signals (explicit season tokens) against this
+            # namespace, and XEM alias pins against the converted indexer season.
+            raw_release_season = None
+
             # "<Title> N - M" ("[Moozzi2] Ajin 2 - 12"): the regex read the season as the episode and
             # dropped the real one. Take the season reading only when the database confirms it exists;
             # otherwise the result stays ambiguous and post-processing will refuse it rather than guess.
@@ -380,6 +648,7 @@ class NameParser(object):
                 )
 
             elif best_result.season_number and best_result.episode_numbers:
+                raw_release_season = best_result.season_number
                 for epNo in best_result.episode_numbers:
                     s = best_result.season_number
                     e = epNo
@@ -419,6 +688,35 @@ class NameParser(object):
 
             if best_result.show.is_scene and not skip_scene_detection:
                 logger.debug(f"Converted parsed result {best_result.original_name} into {best_result}")
+
+            # Franchise chokepoint: EVERY anime mapping this method can produce (SxxEyy branch,
+            # anime-absolute branch, title-season resolution) passes the gate here, after the
+            # existing ambiguity resolver has had its chance. A refusal marks the result ambiguous
+            # AND clears the mapped numbers -- consumers that never learned about `ambiguous`
+            # (nzbSplitter, the proper finder, rescans) must not find an actionable mapping on a
+            # vetoed result. The release-text namespace for the explicit-token rule is the raw
+            # pre-conversion season (SxxEyy branch) or, for the absolute branch on a scene show,
+            # the mapped episode's scene season; alias/year pins compare against the resolved
+            # indexer season inside the gate.
+            if best_result.show.is_anime and not best_result.ambiguous and best_result.season_number is not None and best_result.episode_numbers:
+                gate_scene_season = raw_release_season
+                if gate_scene_season is None and best_result.show.is_scene and not skip_scene_detection and best_result.episode_numbers:
+                    try:
+                        gate_scene_season = scene_numbering.get_scene_numbering(
+                            best_result.show.indexerid, best_result.show.indexer, best_result.season_number, best_result.episode_numbers[0]
+                        )[0]
+                    except Exception as error:
+                        logger.debug(f"Could not derive the scene season for the franchise gate: {error}")
+                if not gate_scene_season and best_result.scene_season and best_result.scene_season > 0:
+                    gate_scene_season = best_result.scene_season
+                allowed, reason = franchise_gate(best_result.original_name, best_result.show, best_result.season_number, scene_season=gate_scene_season)
+                if not allowed:
+                    best_result.ambiguous = True
+                    best_result.ambiguity_reason = reason
+                    best_result.season_number = None
+                    best_result.episode_numbers = []
+                    best_result.ab_episode_numbers = []
+                    logger.debug(f"Refusing the parsed mapping for {best_result.original_name}: {reason}")
 
         # CPU sleep
         time.sleep(0.02)
@@ -520,17 +818,32 @@ class NameParser(object):
         """
         best_result.scene_season = scene_exceptions.get_scene_exception_by_name(best_result.series_name)[1]
 
-        # Only treat the release as season-relative when the title maps UNAMBIGUOUSLY to a
-        # single specific season for THIS show. get_scene_exception_by_name() collapses
-        # multiple rows to the lowest season, so inspect all matches: if the resolved show
-        # has exactly one distinct non-(-1) season for this name, use it; if it spans
-        # several seasons (ambiguous) or only -1 (all seasons), stay series-absolute.
-        exception_seasons = {
-            season
-            for indexer_id, season in scene_exceptions.get_scene_exception_by_name_multiple(best_result.series_name)
-            if indexer_id == best_result.show.indexerid and season is not None and season != -1
-        }
-        season_relative_season = exception_seasons.pop() if len(exception_seasons) == 1 else None
+        # Only treat the release as season-relative when the title maps UNAMBIGUOUSLY to a single
+        # specific season for THIS show. The pin comes from the alias FAMILY (every exception row
+        # sharing the name's normalized form), not the exact string: XEM simultaneously tags
+        # "Mushoku Tensei II - Isekai Ittara Honki Dasu" season 1 and its no-dash twin season 2,
+        # and an exact lookup sees only one of them -- a confident, WRONG pin. A conflicted family
+        # refuses outright (ambiguous): the season-relative reading and the series-absolute
+        # fallback are both known-wrong guesses in that case, and refusing hands the release to
+        # the AI matcher (search) or declines the file (post-processing). The user resolves a
+        # conflicted family deliberately, with a custom/blessed exception, which overrides synced
+        # rows in the family. See franchise_gate / .codex-reviews/franchise_collision_plan.md.
+        pins = alias_season_pins(best_result.series_name, best_result.show)
+        if pins and pins[1]:
+            best_result.ambiguous = True
+            best_result.franchise_conflict = True
+            best_result.ambiguity_reason = (
+                f"the name '{best_result.series_name}' is season-tagged to multiple seasons in scene exceptions; "
+                f"add a custom scene exception to pin the right one"
+            )
+            # Clear the raw numbers too: consumers that never learned about `ambiguous` must not
+            # find an actionable mapping on a refused result.
+            best_result.season_number = None
+            best_result.episode_numbers = []
+            best_result.ab_episode_numbers = []
+            logger.debug(f"Refusing to resolve {best_result.original_name}: {best_result.ambiguity_reason}")
+            return
+        season_relative_season = next(iter(pins[0])) if pins else None
 
         # A1: no scene exception pinned a season, but the title carries a CONFIDENT explicit
         # season token (search-time "K-ON S2 - 01" whose ".S2." was swallowed into the series
@@ -685,6 +998,10 @@ class NameParser(object):
         if self.naming_pattern:
             cache_result = False
 
+        # Captured BEFORE the work: if the alias data changes while this parse is running, the
+        # stored result carries the stale generation and no reader will accept it.
+        parse_generation = scene_exceptions.exceptions_generation()
+
         cached = name_parser_cache[name]
         if cached:
             return cached
@@ -729,6 +1046,7 @@ class NameParser(object):
             final_result.ambiguous = episode_source.ambiguous
             final_result.ambiguity_reason = episode_source.ambiguity_reason
             final_result.discarded_number = episode_source.discarded_number
+            final_result.franchise_conflict = episode_source.franchise_conflict
 
         # if the dirname has a release group/show name I believe it over the filename
         final_result.series_name = self._combine_results(dir_name_result, filename_result, "series_name")
@@ -769,7 +1087,7 @@ class NameParser(object):
             raise InvalidNameException(f"Unable to parse {name} to a valid episode of {final_result.show.name}. Parser result: {final_result}")
 
         if cache_result:
-            name_parser_cache[name] = final_result
+            name_parser_cache.store(name, final_result, parse_generation)
 
         logger.debug(f"Parsed {name} into {final_result}")
         return final_result
@@ -828,6 +1146,11 @@ class ParseResult(object):
         # See NameParser._check_discarded_episode_number.
         self.ambiguous = False
         self.ambiguity_reason = None
+        # Ambiguous specifically because the name matches an alias family whose season tags
+        # contradict each other. Search must NOT hand such a release to the AI matcher: no
+        # deterministic check could tell a right AI answer from a wrong one, so the release stays
+        # unmatched until the user pins the family with a custom scene exception.
+        self.franchise_conflict = False
         # The episode number the regex threw away, when there was one ("Ajin 2 - 12" -> 12), and
         # whether its dash was spaced (the fansub season form) rather than a batch range hyphen.
         self.discarded_number = None
@@ -886,21 +1209,39 @@ class ParseResult(object):
 
 
 class NameParserCache(object):
+    """Parsed-result cache, validated against the scene-exceptions generation on every read.
+
+    A parse depends on alias data (show resolution, season pins, the franchise gate), so a result
+    computed under one generation must not be served after a sync or custom edit changes that
+    data. Entries carry the generation their parse STARTED under; a mismatched entry is simply
+    not returned (a stale in-flight parse may still store its result -- harmlessly, because no
+    reader will ever accept it).
+    """
+
     def __init__(self):
         self.lock = Lock()
         self.data = OrderedDict()
         self.max_size = 200
 
     def __getitem__(self, name):
+        current = scene_exceptions.exceptions_generation()
         with self.lock:
-            value = self.data.get(name)
-            if value:
-                logger.debug(f"Using cached parse result for: {name}")
+            entry = self.data.get(name)
+            if not entry:
+                return None
+            generation, value = entry
+            if generation != current:
+                self.data.pop(name, None)
+                return None
+            logger.debug(f"Using cached parse result for: {name}")
             return value
 
     def __setitem__(self, key, value):
+        self.store(key, value, scene_exceptions.exceptions_generation())
+
+    def store(self, key, value, generation):
         with self.lock:
-            self.data.update({key: value})
+            self.data.update({key: (generation, value)})
             while len(self.data) > self.max_size:
                 self.data.pop(list(self.data)[0], None)
 

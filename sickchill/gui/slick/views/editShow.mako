@@ -400,6 +400,7 @@
                                         <div class="row">
                                             <div class="col-md-12">
                                                 <input type="hidden" id="exceptions" name="exceptions_list" />
+                                                <input type="hidden" id="blessed_exceptions" name="blessed_exceptions_list" />
                                                 <select id="exceptions_list" multiple
                                                         style="height:200px;" class="form-control input350 exceptions_list" title="exceptions_list">
                                                     % for season in range(0, len(seasonResults) + 1):
@@ -409,9 +410,15 @@
                                                         <optgroup data-season="${season}" label="${_('Show') if season == -1 else _('Season ') + str(season)}">
                                                             %if season in scene_exceptions:
                                                                 %for exception in scene_exceptions[season]:
-                                                                    <option ${disabled(exception["custom"])} value="${exception["show_name"]}">
-                                                                        ${exception["show_name"]}
-                                                                    </option>
+                                                                    %if exception["custom"]:
+                                                                        <option value="${exception["show_name"]}">
+                                                                            ${exception["show_name"]}
+                                                                        </option>
+                                                                    %else:
+                                                                        <option value="${exception["show_name"]}" data-synced="1" data-blessed="${int(bool(exception.get("blessed")))}">
+                                                                            ${exception["show_name"]}${" \U0001F4CC" if exception.get("blessed") else ""}
+                                                                        </option>
+                                                                    %endif
                                                                 %endfor
                                                             % else:
                                                             <option class="empty" disabled>${_('None')}</option>
@@ -421,6 +428,7 @@
                                                 </select>
                                                 <div>
                                                     <input id="removeSceneName" value="${_('Remove')}" class="btn float-left" type="button" style="margin-top: 10px;" />
+                                                    <input id="pinSceneName" value="${_('Pin / Unpin Season')}" class="btn float-left" type="button" style="margin-top: 10px; margin-left: 5px;" />
                                                 </div>
                                             </div>
                                         </div>
@@ -436,7 +444,7 @@
                                         </div>
                                         <div class="row">
                                             <div class="col-md-12">
-                                                <label>${_('disabled entries come from a central file on github,')}<br>
+                                                <label>${_('un-removable entries come from central lists (github/XEM/AniDB). If one of them is season-tagged wrongly, select it and use "Pin / Unpin Season" under the season you mean to trust; a pinned (\U0001F4CC) entry overrides the synced season tags for that name.')}<br>
                                                     ${_('if you think something is wrong please go to <a href="https://discord.com/channels/502612977271439372/502612977803984898">Discord Chat</a>.')}</label>
                                             </div>
                                         </div>
