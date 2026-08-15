@@ -2,7 +2,7 @@ import datetime
 import threading
 
 from sickchill import logger, settings
-from sickchill.oldbeard import common, db, scheduler, search_queue, ui
+from sickchill.oldbeard import common, db, generic_queue, scheduler, search_queue, ui
 
 
 class BacklogSearchScheduler(scheduler.Scheduler):
@@ -53,8 +53,13 @@ class BacklogSearcher(object):
 
         if which_shows:
             show_list = which_shows
+            # Asked for by name: a newly added show, or one the user forced from the UI. Outrank the
+            # scheduled sweep's LOW items so it runs now instead of after every other show, while
+            # still yielding to manual searches and failed-download retries, which are HIGH.
+            item_priority = generic_queue.QueuePriorities.NORMAL
         else:
             show_list = settings.show_list
+            item_priority = generic_queue.QueuePriorities.LOW
 
         self._get_lastBacklog()
 
@@ -75,7 +80,7 @@ class BacklogSearcher(object):
             for season, segment in segments.items():
                 self.currentSearchInfo = {"title": f"{curShow.name} Season {season}"}
 
-                backlog_queue_item = search_queue.BacklogQueueItem(curShow, segment)
+                backlog_queue_item = search_queue.BacklogQueueItem(curShow, segment, priority=item_priority)
                 settings.searchQueueScheduler.action.add_item(backlog_queue_item)  # @UndefinedVariable
 
             if not segments:

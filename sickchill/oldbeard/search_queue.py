@@ -25,10 +25,14 @@ class SearchQueue(generic_queue.GenericQueue):
         self.queue_name = "SEARCHQUEUE"
 
     def is_in_queue(self, show, segment):
+        return self.find_backlog_item(show, segment) is not None
+
+    def find_backlog_item(self, show, segment):
+        """Return the backlog item already queued for this show and segment, or None."""
         for cur_item in self.queue:
             if isinstance(cur_item, BacklogQueueItem) and cur_item.show == show and cur_item.segment == segment:
-                return True
-        return False
+                return cur_item
+        return None
 
     def is_ep_in_queue(self, segment):
         for cur_item in self.queue:
@@ -123,7 +127,18 @@ class SearchQueue(generic_queue.GenericQueue):
             add_item = True
         elif isinstance(item, BacklogQueueItem):
             # backlog searches
-            add_item = not self.is_in_queue(item.show, item.segment)
+            with self.lock:
+                queued = self.find_backlog_item(item.show, item.segment)
+                # A duplicate is dropped rather than queued twice, which would otherwise throw away
+                # the priority a forced search carries and leave the show behind the whole sweep.
+                # Promote what is already queued instead. Released before super().add_item() below,
+                # which takes this same non-reentrant lock.
+                promote = queued is not None and item.priority > queued.priority
+                if promote:
+                    queued.priority = item.priority
+            add_item = queued is None
+            if promote:
+                logger.debug(f"Backlog for {item.show.name} is already queued, raising its priority to {item.priority} instead of queueing it twice")
         elif isinstance(item, (ManualSearchQueueItem, FailedQueueItem)):
             # manual and failed searches
             add_item = not self.is_ep_in_queue(item.segment)
@@ -215,9 +230,12 @@ class ManualSearchQueueItem(generic_queue.QueueItem):
 
 
 class BacklogQueueItem(generic_queue.QueueItem):
-    def __init__(self, show, segment):
+    def __init__(self, show, segment, priority=generic_queue.QueuePriorities.LOW):
         super().__init__("Backlog", BACKLOG_SEARCH)
-        self.priority = generic_queue.QueuePriorities.LOW
+        # The scheduled sweep queues every show at LOW and the queue is priority-then-FIFO, so a
+        # backlog asked for by name -- a show just added, or one the user forced -- would otherwise
+        # sort behind the entire sweep and wait for it to drain. Those callers pass NORMAL.
+        self.priority = priority
         self.name = f"BACKLOG-{show.indexerid}"
         self.success = None
         self.show = show
