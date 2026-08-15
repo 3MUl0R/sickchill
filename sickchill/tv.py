@@ -68,6 +68,54 @@ except ModuleNotFoundError:
             shutil.rmtree(path)
 
 
+# IMDb serves 403 to the scraper cinemagoer uses, and every failed attempt costs several
+# HTTP round trips plus a stack of CRITICAL tracebacks from the library's own logger.
+# load_imdb_info runs for each show that has no imdb_info row, on every show load, so a
+# blanket outage used to be paid for once per show per startup. Probe a few shows, and if
+# none of them yield anything, treat IMDb as unavailable and stop asking for a while.
+IMDB_FAILURE_THRESHOLD = 3
+IMDB_BACKOFF_SECONDS = 6 * 60 * 60
+imdb_lock = threading.Lock()
+imdb_consecutive_failures = 0
+imdb_backoff_until = 0.0
+
+
+def imdb_lookups_allowed() -> bool:
+    """False while we are backing off from an IMDb that is refusing us."""
+    with imdb_lock:
+        return time.time() >= imdb_backoff_until
+
+
+def note_imdb_result(success: bool) -> None:
+    """Record the outcome of an IMDb lookup and open/close the backoff window."""
+    global imdb_consecutive_failures, imdb_backoff_until
+    with imdb_lock:
+        if success:
+            imdb_consecutive_failures = 0
+            imdb_backoff_until = 0.0
+            return
+
+        if time.time() < imdb_backoff_until:
+            # A lookup that was already in flight when the window opened. Counting it
+            # would seed the next cycle, so the window after this one would need fewer
+            # than IMDB_FAILURE_THRESHOLD fresh failures to open.
+            return
+
+        imdb_consecutive_failures += 1
+        if imdb_consecutive_failures >= IMDB_FAILURE_THRESHOLD:
+            # Reset the counter as the window opens, so that once this window lapses it
+            # takes another full run of failures to open the next one. Testing the
+            # deadline instead of its truthiness matters: a lapsed deadline is still a
+            # nonzero timestamp, and treating that as "already backing off" would wedge
+            # the backoff permanently open after the first window expired.
+            imdb_consecutive_failures = 0
+            imdb_backoff_until = time.time() + IMDB_BACKOFF_SECONDS
+            logger.info(
+                f"IMDb returned nothing usable for {IMDB_FAILURE_THRESHOLD} shows in a row, "
+                f"skipping IMDb lookups for the next {IMDB_BACKOFF_SECONDS // 3600} hours"
+            )
+
+
 class DirtySetter(object):
     """A descriptor that forbids negative values"""
 
@@ -894,6 +942,22 @@ class TVShow(object):
     def load_imdb_info(self):
         # TODO: Create shows only database from s3 datasets, possibly distributable from sickchill.github.io until they are integrated into sickindexer
 
+        if not imdb_lookups_allowed():
+            logger.debug(f"{self.indexerid}: skipping IMDb lookup, backing off after repeated failures")
+            return
+
+        previous = self.imdb_info
+        try:
+            self._load_imdb_info()
+        finally:
+            # Success means THIS call produced info: a show updating with imdb_info already
+            # loaded would otherwise look like a success and clear the backoff even though
+            # IMDb just refused us. A show that is genuinely absent from IMDb does count as
+            # a failure, which is intentional -- we cannot tell it apart from a block, and
+            # the backoff lifts itself again as soon as any show comes back with info.
+            note_imdb_result(bool(self.imdb_info) and self.imdb_info is not previous)
+
+    def _load_imdb_info(self):
         # Check that the imdb_id we have is valid for searching
         self.check_imdb_id()
 

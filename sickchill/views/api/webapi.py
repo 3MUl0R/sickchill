@@ -1671,7 +1671,10 @@ class CMDSickChillSearchIndexers(ApiCall):
                         }
                     )
 
-                return _responds(RESULT_SUCCESS, {"results": results, "langid": lang_id})
+            # Outside the loop: a search that matched nothing leaves search_results empty,
+            # and returning from inside meant falling off the end with None, which the api
+            # framework then subscripts. An empty result set is a successful search.
+            return _responds(RESULT_SUCCESS, {"results": results, "langid": lang_id})
 
         elif self.indexerid:
             indexer, result = sickchill.indexer.search_indexers_for_series_id(indexerid=self.indexerid, language=self.lang)
